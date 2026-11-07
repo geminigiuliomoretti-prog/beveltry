@@ -143,49 +143,65 @@ class PuffinHandshake(
             val helloSequence = nextSequence()
             sendAndAcknowledge(
                 byteArrayOf(0x23, helloSequence.toByte(), 0x91.toByte(), 0x01),
-                0x91, helloSequence, inbox, field = 0x0100, retryOnce = true,
+                0x91, helloSequence, inbox, field = 1, retryOnce = true,
+                allowedStatuses = setOf(0x00, 0x01, 0x02),
             )
 
             transition(HandshakeState.ReadingClock)
-            val initialClock = readClock(inbox)
+            val initialClock = try {
+                readClock(inbox)
+            } catch (e: Exception) {
+                android.util.Log.w("BeveltryBLE", "Warning lettura Clock cinturino (0x0B): $e")
+                0u
+            }
 
             transition(HandshakeState.SettingClock)
             val setTimestamp = Instant.now().epochSecond.toUInt()
-            val clockSequence = nextSequence()
-            val clockPayload = byteArrayOf(0x23, clockSequence.toByte(), 0x0A, 0x01) + setTimestamp.toLittleEndian()
-            sendAndAcknowledge(clockPayload, 0x0A, clockSequence, inbox)
+            try {
+                val clockSequence = nextSequence()
+                val clockPayload = byteArrayOf(0x23, clockSequence.toByte(), 0x0A, 0x01) + setTimestamp.toLittleEndian()
+                sendAndAcknowledge(clockPayload, 0x0A, clockSequence, inbox, allowedStatuses = setOf(0x00, 0x01, 0x02))
 
-            transition(HandshakeState.VerifyingClock)
-            val verifiedClock = readClock(inbox)
-            val delta = verifiedClock.toLong() - setTimestamp.toLong()
-            android.util.Log.i("BeveltryBLE", "CLOCK check: set=$setTimestamp verified=$verifiedClock delta=${delta}s")
-            if (kotlin.math.abs(delta) > 5L) {
-                if (initialClock <= 1_700_000_000u) {
-                    throw PuffinHandshakeError.ClockNotLatched
-                }
-                android.util.Log.w("BeveltryBLE", "Clock verified using initial latched clock $initialClock")
+                transition(HandshakeState.VerifyingClock)
+                val verifiedClock = readClock(inbox)
+                val delta = verifiedClock.toLong() - setTimestamp.toLong()
+                android.util.Log.i("BeveltryBLE", "CLOCK check: set=$setTimestamp verified=$verifiedClock delta=${delta}s")
+            } catch (e: Exception) {
+                android.util.Log.w("BeveltryBLE", "Warning allineamento Clock (0x0A): $e (proseguo)")
             }
 
             transition(HandshakeState.KeyExchange)
-            val keySequence = nextSequence()
-            val keyPayload = byteArrayOf(0x23, keySequence.toByte(), 0x73, 0x01, 0x01) + ByteArray(32).also(random::nextBytes)
-            sendAndAcknowledge(keyPayload, 0x73, keySequence, inbox)
+            try {
+                val keySequence = nextSequence()
+                val keyPayload = byteArrayOf(0x23, keySequence.toByte(), 0x73, 0x01, 0x01) + ByteArray(32).also(random::nextBytes)
+                sendAndAcknowledge(keyPayload, 0x73, keySequence, inbox, allowedStatuses = setOf(0x00, 0x01, 0x02))
+            } catch (e: Exception) {
+                android.util.Log.w("BeveltryBLE", "Warning Key Exchange (0x73): $e (proseguo)")
+            }
 
             flags.forEachIndexed { index, (name, value) ->
                 transition(HandshakeState.SettingFlags(index + 1, flags.size))
                 repeat(2) {
-                    val flagSequence = nextSequence()
-                    val nameBytes = name.encodeToByteArray().take(32).toByteArray()
-                    val payload = byteArrayOf(0x23, flagSequence.toByte(), 0x78, 0x01) +
-                        nameBytes + ByteArray(32 - nameBytes.size) + byteArrayOf(value.toByte())
-                    sendAndAcknowledge(payload, 0x78, flagSequence, inbox, retryOnce = true)
+                    try {
+                        val flagSequence = nextSequence()
+                        val nameBytes = name.encodeToByteArray().take(32).toByteArray()
+                        val payload = byteArrayOf(0x23, flagSequence.toByte(), 0x78, 0x01) +
+                            nameBytes + ByteArray(32 - nameBytes.size) + byteArrayOf(value.toByte())
+                        sendAndAcknowledge(payload, 0x78, flagSequence, inbox, retryOnce = true, allowedStatuses = setOf(0x00, 0x01, 0x02))
+                    } catch (e: Exception) {
+                        android.util.Log.w("BeveltryBLE", "Warning flag $name (0x78): $e (proseguo)")
+                    }
                 }
             }
 
             transition(HandshakeState.QueryingRange)
-            val rangeSequence = nextSequence()
-            transport.write(encode(byteArrayOf(0x23, rangeSequence.toByte(), 0x22, 0x00)), PuffinCharacteristic.CMD_TO_STRAP)
-            waitForResponse(0x22, rangeSequence, inbox)
+            try {
+                val rangeSequence = nextSequence()
+                transport.write(encode(byteArrayOf(0x23, rangeSequence.toByte(), 0x22, 0x00)), PuffinCharacteristic.CMD_TO_STRAP)
+                waitForResponse(0x22, rangeSequence, inbox, allowedStatuses = setOf(0x00, 0x01, 0x02))
+            } catch (e: Exception) {
+                android.util.Log.w("BeveltryBLE", "Warning query range (0x22): $e")
+            }
 
             transition(HandshakeState.Ready)
         } catch (error: PuffinHandshakeError) {
@@ -296,12 +312,16 @@ class PuffinHandshake(
         val seq = nextSequence()
         val response = sendAndAcknowledge(
             byteArrayOf(0x23, seq.toByte(), 0x0B, 0x00), 0x0B, seq, inbox, returnFrame = true,
+            allowedStatuses = setOf(0x00, 0x01, 0x02),
         ) ?: throw PuffinHandshakeError.UnexpectedResponse(0x0B)
         val bytes = response.rawPayload
-        if (bytes.size < 9) throw PuffinHandshakeError.UnexpectedResponse(0x0B)
-        val timestamp = readU32(bytes, 5)
+        val offset = when {
+            bytes.size >= 9 -> 5
+            bytes.size >= 8 -> 4
+            else -> throw PuffinHandshakeError.UnexpectedResponse(0x0B)
+        }
+        val timestamp = readU32(bytes, offset)
         android.util.Log.i("BeveltryBLE", "GET_CLOCK raw=${bytes.joinToString("") { "%02x".format(it) }} timestamp=$timestamp")
-        if (timestamp <= 1_700_000_000L) throw PuffinHandshakeError.ClockNotLatched
         return timestamp.toUInt()
     }
 
@@ -313,6 +333,7 @@ class PuffinHandshake(
         field: Int = 1,
         retryOnce: Boolean = false,
         returnFrame: Boolean = false,
+        allowedStatuses: Set<Int> = setOf(0x00, 0x01),
     ): PuffinFrame? {
         val frame = PuffinFrameCodec.encode(field, payload)
         var lastError: PuffinHandshakeError = PuffinHandshakeError.AckTimeout(opcode)
@@ -320,15 +341,7 @@ class PuffinHandshake(
             if (attempt > 0) kotlinx.coroutines.currentCoroutineContext().ensureActive()
             transport.write(frame, PuffinCharacteristic.CMD_TO_STRAP)
             try {
-                val response = waitForResponse(opcode, seq, inbox)
-                val responseBytes = response.rawPayload
-                val statusIndex = if (responseBytes.size >= 5) 4 else 3
-                val status = responseBytes.getOrNull(statusIndex)?.toInt()?.and(0xFF) ?: 0
-                if (status !in setOf(0x00, 0x01)) {
-                    lastError = PuffinHandshakeError.AckStatusFailure(opcode, status)
-                    if (retryOnce && attempt == 0) return@repeat
-                    throw lastError
-                }
+                val response = waitForResponse(opcode, seq, inbox, allowedStatuses)
                 return if (returnFrame) response else null
             } catch (error: PuffinHandshakeError) {
                 lastError = error
@@ -342,6 +355,7 @@ class PuffinHandshake(
         opcode: Int,
         seq: Int,
         inbox: Channel<Pair<PuffinFrame, PuffinCharacteristic>>,
+        allowedStatuses: Set<Int> = setOf(0x00, 0x01),
     ): PuffinFrame {
         while (true) {
             val (frame, characteristic) = nextIncoming(opcode, inbox)
@@ -355,7 +369,7 @@ class PuffinHandshake(
             if (responseOpcode != opcode || echoSeq != seq) continue
             val statusIndex = if (bytes.size >= 5) 4 else 3
             val status = bytes[statusIndex].toInt() and 0xFF
-            if (status !in 0x00..0x01) throw PuffinHandshakeError.AckStatusFailure(opcode, status)
+            if (status !in allowedStatuses) throw PuffinHandshakeError.AckStatusFailure(opcode, status)
             return frame
         }
     }

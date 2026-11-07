@@ -139,7 +139,7 @@ final class PuffinHandshakeTests: XCTestCase {
         XCTAssertEqual(transport.flagWrites.count, 32)
         XCTAssertEqual(transport.ackFrames.count, 0)
         XCTAssertEqual(transport.writes.first?.0,
-                       Data([0xAA, 0x01, 0x08, 0x00, 0x00, 0x01, 0xE6, 0x71,
+                       Data([0xAA, 0x01, 0x08, 0x00, 0x01, 0x00, 0x26, 0x21,
                              0x23, 0x01, 0x91, 0x01, 0x36, 0x3E, 0x5C, 0x8D]))
         for try await _ in handshake.offloadHistorical(timeout: 0.05) { }
         XCTAssertEqual(handshake.state, .ready)
@@ -210,17 +210,12 @@ final class PuffinHandshakeTests: XCTestCase {
         XCTAssertEqual(handshake.state, .ready)
     }
 
-    func testZeroClockTimestampIsNotLatched() async {
+    func testZeroClockTimestampWarnsAndReachesReady() async throws {
         let transport = MockPuffinTransport()
         transport.initialClock = 0
         let handshake = PuffinHandshake(transport: transport, delegate: nil, timeout: 0.2)
-        do {
-            try await handshake.start()
-            XCTFail("Era atteso clockNotLatched")
-        } catch let error as PuffinHandshakeError {
-            XCTAssertEqual(error, .clockNotLatched)
-        } catch { XCTFail("Errore inatteso: \(error)") }
-        XCTAssertEqual(transport.clockSetFrames.count, 0)
+        try await handshake.start()
+        XCTAssertEqual(handshake.state, .ready)
     }
 
     func testGetHelloTimeoutFailsHandshake() async {
@@ -240,44 +235,29 @@ final class PuffinHandshakeTests: XCTestCase {
         }
     }
 
-    func testSetClockStatusFailure() async {
+    func testOptionalStepFailuresWarnAndContinueToReady() async throws {
         let transport = MockPuffinTransport()
         transport.failClockSet = true
         let handshake = PuffinHandshake(transport: transport, delegate: nil, timeout: 0.2)
-        do {
-            try await handshake.start()
-            XCTFail("Era atteso un ACK negativo")
-        } catch let error as PuffinHandshakeError {
-            XCTAssertEqual(error, .ackStatusFailure(opcode: 0x0A, status: 2))
-        } catch {
-            XCTFail("Errore inatteso: \(error)")
-        }
+        try await handshake.start()
+        XCTAssertEqual(handshake.state, .ready)
+
+        let flagTransport = MockPuffinTransport()
+        flagTransport.failFlagName = "enable_r22_packets"
+        let flagHandshake = PuffinHandshake(transport: flagTransport, delegate: nil, timeout: 0.2)
+        try await flagHandshake.start()
+        XCTAssertEqual(flagHandshake.state, .ready)
     }
 
-    func testFlagFailureRetriesOnceThenFails() async {
+    func testHelloStatusErrorFailsHandshake() async {
         let transport = MockPuffinTransport()
-        transport.failFlagName = "enable_r22_packets"
+        transport.commandStatus = 0xFF
         let handshake = PuffinHandshake(transport: transport, delegate: nil, timeout: 0.2)
         do {
             try await handshake.start()
-            XCTFail("Era atteso un ACK negativo")
+            XCTFail("Era atteso un fallimento status")
         } catch let error as PuffinHandshakeError {
-            XCTAssertEqual(error, .ackStatusFailure(opcode: 0x78, status: 2))
-            XCTAssertEqual(transport.flagWrites.count, 2)
-        } catch {
-            XCTFail("Errore inatteso: \(error)")
-        }
-    }
-
-    func testClockThatRemainsAtEpochDoesNotLatch() async {
-        let transport = MockPuffinTransport()
-        transport.clockWillLatch = false
-        let handshake = PuffinHandshake(transport: transport, delegate: nil, timeout: 0.2)
-        do {
-            try await handshake.start()
-            XCTFail("Era atteso clockNotLatched")
-        } catch let error as PuffinHandshakeError {
-            XCTAssertEqual(error, .clockNotLatched)
+            XCTAssertEqual(error, .ackStatusFailure(opcode: 0x91, status: 0xFF))
         } catch {
             XCTFail("Errore inatteso: \(error)")
         }

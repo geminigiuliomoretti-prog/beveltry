@@ -129,7 +129,6 @@ void main() {
       final handshake = DartPuffinHandshake(transport, timeout: const Duration(seconds: 1));
 
       // Auto-responder sul mock transport: quando riceve un comando write, emette l'ACK 0x24 corrispondente
-      final sub = transport.incomingFrames; // trigger
       void handleWrite(Uint8List frame) {
         final inner = PuffinFrameCodec.decode(frame);
         final seq = inner[1];
@@ -164,17 +163,79 @@ void main() {
       expect(progressSteps, contains(contains('HELLO confermato')));
       expect(progressSteps, contains(contains('Handshake hardware completato')));
       expect(transport.writtenFrames.length, greaterThan(15));
+
+      // Verifica che il frame 0x91 inviato usi field = 1 (byte 4 e 5: 0x01, 0x00 LE)
+      final firstFrame = transport.writtenFrames.first;
+      expect(firstFrame[4], equals(0x01));
+      expect(firstFrame[5], equals(0x00));
     });
 
-    test('Handshake fallisce se il cinturino risponde con errore status', () async {
+    test('0x24 legge status a byte[4] e non confonde strap_seq=0x02 con status', () async {
+      final transport = MockPuffinTransport();
+      final handshake = DartPuffinHandshake(transport, timeout: const Duration(milliseconds: 300));
+
+      final handshakeFuture = handshake.start();
+
+      // Risponde a 0x91 con strap_seq = 0x02 a byte[3] e status = 0x00 a byte[4]
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      transport.emit(Uint8List.fromList([0x24, 0x01, 0x91, 0x02, 0x00]));
+
+      // Risponde ai restanti comandi per far completare
+      for (var i = 0; i < 25; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        if (transport.writtenFrames.length > 1) {
+          final last = PuffinFrameCodec.decode(transport.writtenFrames.last);
+          final op = last[2];
+          final seq = last[1];
+          if (op == 0x0B) {
+            transport.emit(Uint8List.fromList([0x24, seq, 0x0B, 0x03, 0x00, 0x00, 0x50, 0x69, 0x2A]));
+          } else {
+            transport.emit(Uint8List.fromList([0x24, seq, op, 0x04, 0x00]));
+          }
+        }
+      }
+
+      await handshakeFuture;
+      expect(handshake, isNotNull);
+    });
+
+    test('0x91 accetta status 0x02 (Session Already Active)', () async {
+      final transport = MockPuffinTransport();
+      final handshake = DartPuffinHandshake(transport, timeout: const Duration(milliseconds: 300));
+
+      final handshakeFuture = handshake.start();
+
+      // Risponde a 0x91 con status 0x02 a byte[4]
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      transport.emit(Uint8List.fromList([0x24, 0x01, 0x91, 0x01, 0x02]));
+
+      // Risponde ai restanti comandi
+      for (var i = 0; i < 25; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        if (transport.writtenFrames.length > 1) {
+          final last = PuffinFrameCodec.decode(transport.writtenFrames.last);
+          final op = last[2];
+          final seq = last[1];
+          if (op == 0x0B) {
+            transport.emit(Uint8List.fromList([0x24, seq, 0x0B, 0x01, 0x00, 0x00, 0x50, 0x69, 0x2A]));
+          } else {
+            transport.emit(Uint8List.fromList([0x24, seq, op, 0x01, 0x00]));
+          }
+        }
+      }
+
+      await handshakeFuture;
+    });
+
+    test('Handshake fallisce se il cinturino risponde con status di errore 0xFF su 0x91', () async {
       final transport = MockPuffinTransport();
       final handshake = DartPuffinHandshake(transport, timeout: const Duration(milliseconds: 200));
 
       final handshakeFuture = handshake.start();
 
-      // Risponde con status di errore 0x02 per HELLO (0x91)
+      // Risponde con status di errore 0xFF per HELLO (0x91)
       await Future<void>.delayed(const Duration(milliseconds: 10));
-      transport.emit(Uint8List.fromList([0x24, 0x01, 0x91, 0x00, 0x02]));
+      transport.emit(Uint8List.fromList([0x24, 0x01, 0x91, 0x00, 0xFF]));
 
       expect(
         () async => await handshakeFuture,

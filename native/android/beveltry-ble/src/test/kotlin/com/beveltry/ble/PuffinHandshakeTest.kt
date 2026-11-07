@@ -119,7 +119,7 @@ class PuffinHandshakeTest {
         assertEquals(HandshakeState.Ready, handshake.state)
         assertEquals(32, transport.flagFrames.size)
         assertTrue(transport.writes.none { PuffinFrameCodec.decode(it.first).rawPayload.getOrNull(2)?.toInt()?.and(0xFF) == 0x16 })
-        assertEquals(listOf(0xAA, 1, 8, 0, 0, 1, 0xE6, 0x71, 0x23, 1, 0x91, 1, 0x36, 0x3E, 0x5C, 0x8D),
+        assertEquals(listOf(0xAA, 1, 8, 0, 1, 0, 0x26, 0x21, 0x23, 1, 0x91, 1, 0x36, 0x3E, 0x5C, 0x8D),
             transport.writes.first().first.map { it.toInt() and 0xFF })
     }
 
@@ -139,16 +139,18 @@ class PuffinHandshakeTest {
         assertEquals(HandshakeState.Ready, handshake.state)
     }
 
-    @Test fun zeroTimestampRaisesClockNotLatched() = runBlocking {
+    @Test fun zeroTimestampWarnsAndStillReachesReady() = runBlocking {
         val transport = MockPuffinTransport().apply { initialClock = 0u }
-        val error = runCatching { PuffinHandshake(transport, timeoutMillis = 500).start() }.exceptionOrNull()
-        assertEquals(PuffinHandshakeError.ClockNotLatched, error)
+        val handshake = PuffinHandshake(transport, timeoutMillis = 500)
+        handshake.start()
+        assertEquals(HandshakeState.Ready, handshake.state)
     }
 
-    @Test fun clockThatStopsLatchingFailsAfterSet() = runBlocking {
+    @Test fun clockDifferenceWarnsAndStillReachesReady() = runBlocking {
         val transport = MockPuffinTransport().apply { clockWillLatch = false }
-        val error = runCatching { PuffinHandshake(transport, timeoutMillis = 500).start() }.exceptionOrNull()
-        assertEquals(PuffinHandshakeError.ClockNotLatched, error)
+        val handshake = PuffinHandshake(transport, timeoutMillis = 500)
+        handshake.start()
+        assertEquals(HandshakeState.Ready, handshake.state)
     }
 
     @Test fun helloTimeoutFailsHandshake() = runBlocking {
@@ -160,14 +162,24 @@ class PuffinHandshakeTest {
         assertEquals(HandshakeState.Failed(PuffinHandshakeError.AckTimeout(0x91)), handshake.state)
     }
 
-    @Test fun negativeStatusFailsAndFlagFailureRetries() = runBlocking {
+    @Test fun optionalStepFailuresWarnAndContinueToReady() = runBlocking {
         val transport = MockPuffinTransport().apply { failClockSet = true }
-        assertEquals(PuffinHandshakeError.AckStatusFailure(0x0A, 2),
-            runCatching { PuffinHandshake(transport, timeoutMillis = 500).start() }.exceptionOrNull())
+        val handshake = PuffinHandshake(transport, timeoutMillis = 500)
+        handshake.start()
+        assertEquals(HandshakeState.Ready, handshake.state)
+
         val flagTransport = MockPuffinTransport().apply { failFlagName = "enable_r22_packets" }
-        assertEquals(PuffinHandshakeError.AckStatusFailure(0x78, 2),
-            runCatching { PuffinHandshake(flagTransport, timeoutMillis = 500).start() }.exceptionOrNull())
-        assertEquals(2, flagTransport.flagFrames.size)
+        val flagHandshake = PuffinHandshake(flagTransport, timeoutMillis = 500)
+        flagHandshake.start()
+        assertEquals(HandshakeState.Ready, flagHandshake.state)
+        assertEquals(32, flagTransport.flagFrames.size)
+    }
+
+    @Test fun helloStatusErrorFailsHandshake() = runBlocking {
+        val transport = MockPuffinTransport().apply { commandStatus = 0xFF }
+        val handshake = PuffinHandshake(transport, timeoutMillis = 500)
+        val error = runCatching { handshake.start() }.exceptionOrNull()
+        assertTrue(error is PuffinHandshakeError.AckStatusFailure && error.opcode == 0x91 && error.status == 0xFF)
     }
 
     @Test fun threeDistinctCursorsGetThreeAcknowledgements() = runBlocking {

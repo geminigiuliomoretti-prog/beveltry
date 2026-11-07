@@ -245,7 +245,7 @@ class SyncService {
       }
 
       final statusHex = '0x${status.toRadixString(16).padLeft(2, '0').toUpperCase()}';
-      final ok = status == 0x00 || status == 0x01;
+      final ok = status == 0x00 || status == 0x01 || status == 0x02;
       statusMessageNotifier.value = ok
           ? 'Vibrazione attivata con successo! Status ACK cinturino: $statusHex'
           : 'Comando vibrazione respinto dal cinturino con status $statusHex';

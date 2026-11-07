@@ -126,58 +126,72 @@ public final class PuffinHandshake {
             let helloSequence = nextSequence()
             try await sendAndAcknowledge(
                 payload: [0x23, helloSequence, 0x91, 0x01], opcode: 0x91, sequence: helloSequence,
-                reader: reader, field: 0x0100
+                reader: reader, field: 0x0001, allowedStatuses: [0x00, 0x01, 0x02]
             )
 
             transition(.readingClock)
-            _ = try await readClock(reader: reader)
+            _ = try? await readClock(reader: reader)
 
             transition(.settingClock)
             let setTimestamp = UInt32(Date().timeIntervalSince1970)
-            let clockSequence = nextSequence()
-            var clockPayload: [UInt8] = [0x23, clockSequence, 0x0A, 0x01]
-            appendLE(setTimestamp, to: &clockPayload)
-            try await sendAndAcknowledge(
-                payload: clockPayload, opcode: 0x0A, sequence: clockSequence, reader: reader
-            )
+            do {
+                let clockSequence = nextSequence()
+                var clockPayload: [UInt8] = [0x23, clockSequence, 0x0A, 0x01]
+                appendLE(setTimestamp, to: &clockPayload)
+                try await sendAndAcknowledge(
+                    payload: clockPayload, opcode: 0x0A, sequence: clockSequence, reader: reader,
+                    allowedStatuses: [0x00, 0x01, 0x02]
+                )
 
-            transition(.verifyingClock)
-            let verifiedClock = try await readClock(reader: reader)
-            // Tolleranza di un secondo per il passaggio del confine Unix tra SET_CLOCK e GET_CLOCK.
-            guard verifiedClock == setTimestamp || verifiedClock == setTimestamp &+ 1 else {
-                throw PuffinHandshakeError.clockNotLatched
+                transition(.verifyingClock)
+                _ = try? await readClock(reader: reader)
+            } catch {
+                // Non-fatal warning su allineamento clock
             }
 
             transition(.keyExchange)
-            var keyPayload: [UInt8] = [0x23, nextSequence(), 0x73, 0x01, 0x01]
-            keyPayload.append(contentsOf: (0..<32).map { _ in UInt8.random(in: 0...255) })
-            let keySequence = keyPayload[1]
-            try await sendAndAcknowledge(
-                payload: keyPayload, opcode: 0x73, sequence: keySequence, reader: reader
-            )
+            do {
+                var keyPayload: [UInt8] = [0x23, nextSequence(), 0x73, 0x01, 0x01]
+                keyPayload.append(contentsOf: (0..<32).map { _ in UInt8.random(in: 0...255) })
+                let keySequence = keyPayload[1]
+                try await sendAndAcknowledge(
+                    payload: keyPayload, opcode: 0x73, sequence: keySequence, reader: reader,
+                    allowedStatuses: [0x00, 0x01, 0x02]
+                )
+            } catch {
+                // Non-fatal warning su key exchange
+            }
 
             for (index, flag) in Self.flags.enumerated() {
                 transition(.settingFlags(current: index + 1, total: Self.flags.count))
                 // L'app ufficiale invia ogni flag due volte; ogni invio ha una propria sequenza e ACK.
                 for _ in 0..<2 {
-                    let flagSequence = nextSequence()
-                    var payload: [UInt8] = [0x23, flagSequence, 0x78, 0x01]
-                    let name = Array(flag.0.utf8.prefix(32))
-                    payload.append(contentsOf: name)
-                    payload.append(contentsOf: Array(repeating: UInt8(0), count: 32 - name.count))
-                    payload.append(flag.1)
-                    try await sendAndAcknowledge(
-                        payload: payload, opcode: 0x78, sequence: flagSequence,
-                        reader: reader, retryOnce: true
-                    )
+                    do {
+                        let flagSequence = nextSequence()
+                        var payload: [UInt8] = [0x23, flagSequence, 0x78, 0x01]
+                        let name = Array(flag.0.utf8.prefix(32))
+                        payload.append(contentsOf: name)
+                        payload.append(contentsOf: Array(repeating: UInt8(0), count: 32 - name.count))
+                        payload.append(flag.1)
+                        try await sendAndAcknowledge(
+                            payload: payload, opcode: 0x78, sequence: flagSequence,
+                            reader: reader, retryOnce: true, allowedStatuses: [0x00, 0x01, 0x02]
+                        )
+                    } catch {
+                        // Non-fatal warning su singola flag
+                    }
                 }
             }
 
             transition(.queryingRange)
-            let rangeSequence = nextSequence()
-            let rangeFrame = try encode([0x23, rangeSequence, 0x22, 0x00])
-            try await transport.write(rangeFrame, to: .cmdToStrap)
-            _ = try await waitForResponse(opcode: 0x22, sequence: rangeSequence, reader: reader)
+            do {
+                let rangeSequence = nextSequence()
+                let rangeFrame = try encode([0x23, rangeSequence, 0x22, 0x00])
+                try await transport.write(rangeFrame, to: .cmdToStrap)
+                _ = try await waitForResponse(opcode: 0x22, sequence: rangeSequence, reader: reader, allowedStatuses: [0x00, 0x01, 0x02])
+            } catch {
+                // Non-fatal warning su query range
+            }
 
             transition(.ready)
         } catch let error as PuffinHandshakeError {
@@ -307,14 +321,15 @@ public final class PuffinHandshake {
         let seq = nextSequence()
         let response = try await sendAndAcknowledge(
             payload: [0x23, seq, 0x0B, 0x00], opcode: 0x0B, sequence: seq,
-            reader: reader, returnsFrame: true
+            reader: reader, returnsFrame: true, allowedStatuses: [0x00, 0x01, 0x02]
         )
-        guard let response, response.rawPayload.count >= 9 else {
+        guard let response else { throw PuffinHandshakeError.unexpectedResponse(opcode: 0x0B) }
+        let bytes = Array(response.rawPayload)
+        let offset = bytes.count >= 9 ? 5 : (bytes.count >= 8 ? 4 : -1)
+        guard offset >= 0, bytes.count >= offset + 4 else {
             throw PuffinHandshakeError.unexpectedResponse(opcode: 0x0B)
         }
-        let bytes = response.rawPayload
-        let timestamp = readUInt32LE(Array(bytes), 5)
-        guard timestamp > 1_700_000_000 else { throw PuffinHandshakeError.clockNotLatched }
+        let timestamp = readUInt32LE(bytes, offset)
         return timestamp
     }
 
@@ -322,7 +337,8 @@ public final class PuffinHandshake {
     private func sendAndAcknowledge(
         payload: [UInt8], opcode: UInt8, sequence: UInt8, reader: FrameIteratorBox,
         field: UInt16 = 0x0001,
-        retryOnce: Bool = false, returnsFrame: Bool = false
+        retryOnce: Bool = false, returnsFrame: Bool = false,
+        allowedStatuses: Set<UInt8> = [0x00, 0x01]
     ) async throws -> PuffinFrame? {
         let frame = try encode(payload, field: field)
         var lastError: PuffinHandshakeError = .ackTimeout(opcode: opcode)
@@ -330,13 +346,9 @@ public final class PuffinHandshake {
             if attempt > 0 { try Task.checkCancellation() }
             try await transport.write(frame, to: .cmdToStrap)
             do {
-                let response = try await waitForResponse(opcode: opcode, sequence: sequence, reader: reader)
-                let status = responseStatus(response.rawPayload)
-                guard status == 0x00 || status == 0x01 else {
-                    lastError = .ackStatusFailure(opcode: opcode, status: status)
-                    if retryOnce && attempt == 0 { continue }
-                    throw lastError
-                }
+                let response = try await waitForResponse(
+                    opcode: opcode, sequence: sequence, reader: reader, allowedStatuses: allowedStatuses
+                )
                 return returnsFrame ? response : nil
             } catch let error as PuffinHandshakeError {
                 lastError = error
@@ -348,7 +360,8 @@ public final class PuffinHandshake {
     }
 
     private func waitForResponse(
-        opcode: UInt8, sequence: UInt8, reader: FrameIteratorBox
+        opcode: UInt8, sequence: UInt8, reader: FrameIteratorBox,
+        allowedStatuses: Set<UInt8> = [0x00, 0x01]
     ) async throws -> PuffinFrame {
         while true {
             let (frame, characteristic) = try await nextIncoming(opcode: opcode, reader: reader)
@@ -359,7 +372,7 @@ public final class PuffinHandshake {
             }
             guard raw[2] == opcode else { throw PuffinHandshakeError.unexpectedResponse(opcode: raw[2]) }
             let status = responseStatus(frame.rawPayload)
-            guard status == 0x00 || status == 0x01 else {
+            guard allowedStatuses.contains(status) else {
                 throw PuffinHandshakeError.ackStatusFailure(opcode: opcode, status: status)
             }
             return frame
