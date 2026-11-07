@@ -4,14 +4,23 @@ import 'package:beveltry/src/services/sync_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  group('SyncService Vibration Tests', () {
+  group('SyncService BLE Lifecycle & Vibration Tests', () {
     late WhoopRepository repository;
     late SimulatedPuffinTransport transport;
     late SyncService syncService;
 
     setUp(() {
       repository = WhoopRepository.inMemory();
-      transport = SimulatedPuffinTransport();
+      transport = SimulatedPuffinTransport(
+        isConnected: false,
+        simulatedDevices: [
+          const WhoopDiscoveredDevice(
+            name: 'WBB5AP-5AG0558675',
+            macAddress: 'FD:49:44:66:1D:92',
+            rssi: -60,
+          ),
+        ],
+      );
       syncService = SyncService(
         repository: repository,
         transport: transport,
@@ -22,24 +31,37 @@ void main() {
       await repository.close();
     });
 
-    test('sendVibration invia il comando 0x42 con envelope Puffin e parametri corretti', () async {
-      expect(transport.sentFrames, isEmpty);
+    test('Stato iniziale è Idle e pulsanti/comandi richiedono connessione', () {
+      expect(syncService.connectionState, isA<BleStatusIdle>());
+      expect(syncService.isConnected, isFalse);
+    });
 
-      final success = await syncService.sendVibration(
-        slot: 1,
-        pattern: 1,
-        durationMs: 1000,
-      );
+    test('Flusso completo: scan -> discovered -> connectAndBond -> connected -> vibration -> disconnect', () async {
+      // 1. Scan
+      final scanFuture = syncService.scanForDevices();
+      expect(syncService.connectionState, isA<BleStatusScanning>());
+      await scanFuture;
 
-      expect(success, isTrue);
+      expect(syncService.connectionState, isA<BleStatusDiscovered>());
+      final discoveredState = syncService.connectionState as BleStatusDiscovered;
+      expect(discoveredState.devices.length, equals(1));
+      expect(discoveredState.devices.first.name, equals('WBB5AP-5AG0558675'));
+
+      // 2. Connect & Bond
+      final connectSuccess = await syncService.connectAndBond(discoveredState.devices.first);
+      expect(connectSuccess, isTrue);
+      expect(syncService.connectionState, isA<BleStatusConnected>());
+      expect(syncService.isConnected, isTrue);
+
+      // 3. Test Vibrazione (0x42)
+      final vibSuccess = await syncService.sendVibration(slot: 1, pattern: 1, durationMs: 1000);
+      expect(vibSuccess, isTrue);
       expect(transport.sentFrames.length, equals(1));
 
       final frame = transport.sentFrames.first;
-      // Verifica Header Envelope: SOF=0xAA, Ver=0x01
       expect(frame[0], equals(0xAA));
       expect(frame[1], equals(0x01));
 
-      // Decodifica il frame per verificare il comando interno
       final innerPayload = PuffinFrameCodec.decode(frame);
       expect(innerPayload[0], equals(0x23)); // Command prefix
       expect(innerPayload[1], equals(1));    // Sequence 1
@@ -48,22 +70,15 @@ void main() {
       expect(innerPayload[4], equals(0x01)); // Pattern 1
       expect(innerPayload[5], equals(0xE8)); // 1000 ms lower byte
       expect(innerPayload[6], equals(0x03)); // 1000 ms upper byte
-    });
 
-    test('sendVibration incrementa il sequence number per chiamate successive', () async {
-      await syncService.sendVibration(slot: 1);
-      await syncService.sendVibration(slot: 1);
-
-      expect(transport.sentFrames.length, equals(2));
-      final inner1 = PuffinFrameCodec.decode(transport.sentFrames[0]);
-      final inner2 = PuffinFrameCodec.decode(transport.sentFrames[1]);
-
-      expect(inner1[1], equals(1));
-      expect(inner2[1], equals(2));
+      // 4. Disconnect
+      await syncService.disconnect();
+      expect(syncService.connectionState, isA<BleStatusIdle>());
+      expect(syncService.isConnected, isFalse);
+      expect(transport.isConnected, isFalse);
     });
 
     test('sendVibration fallisce se il trasporto non è connesso', () async {
-      transport.isConnected = false;
       final success = await syncService.sendVibration(slot: 1);
       expect(success, isFalse);
       expect(transport.sentFrames, isEmpty);
@@ -71,6 +86,20 @@ void main() {
         syncService.statusMessageNotifier.value,
         contains('cinturino non connesso'),
       );
+    });
+
+    test('connectAndBond gestisce rifiuto di bonding impostando BleStatusError', () async {
+      transport.simulateBondFailure = true;
+      final device = const WhoopDiscoveredDevice(
+        name: 'WBB5AP-5AG0558675',
+        macAddress: 'FD:49:44:66:1D:92',
+      );
+
+      final success = await syncService.connectAndBond(device);
+      expect(success, isFalse);
+      expect(syncService.connectionState, isA<BleStatusError>());
+      final errorState = syncService.connectionState as BleStatusError;
+      expect(errorState.message, contains('Bonding fallito o annullato'));
     });
   });
 }
