@@ -40,6 +40,11 @@ kotlin {
     }
 }
 
+dependencies {
+    implementation(project(":beveltry-ble"))
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+}
+
 flutter {
     source = "../.."
 }

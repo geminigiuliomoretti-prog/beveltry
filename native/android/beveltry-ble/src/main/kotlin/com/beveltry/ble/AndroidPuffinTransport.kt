@@ -115,6 +115,35 @@ class AndroidPuffinTransport(
         emit(AndroidBleState.Ready)
     }
 
+    /**
+     * Connette il GATT, richiede esplicitamente il bonding (popup nativo Android)
+     * e notifica al cinturino l'avvenuta associazione con pacchetto HELLO (0x91),
+     * facendo cessare il lampeggio blu del LED di pairing.
+     */
+    suspend fun connectAndBond(
+        device: BluetoothDevice,
+        onBondingStarted: () -> Unit = {},
+        timeoutMillis: Long = 60_000,
+    ) {
+        connectAndAwaitReady(device, timeoutMillis = 15_000)
+        onBondingStarted()
+        val bonded = bonder.bond(device, timeoutMillis)
+        if (!bonded) {
+            disconnect()
+            throw WhoopBondException("Bonding non completato o rifiutato")
+        }
+
+        subscribe(PuffinCharacteristic.CMD_FROM_STRAP)
+        subscribe(PuffinCharacteristic.EVENTS_FROM_STRAP)
+        subscribe(PuffinCharacteristic.DATA_FROM_STRAP)
+
+        // HELLO (0x91) conferma l'accoppiamento autenticato al firmware e spegne il LED blu
+        val helloSeq = 1
+        val helloPayload = byteArrayOf(0x23, helloSeq.toByte(), 0x91.toByte(), 0x01)
+        val frame = PuffinFrameCodec.encode(field = 0x0100, helloPayload)
+        write(frame, PuffinCharacteristic.CMD_TO_STRAP)
+    }
+
     private suspend fun connectAndAwaitReady(device: BluetoothDevice, timeoutMillis: Long) {
         requireConnectPermission()
         check(state == AndroidBleState.Disconnected) { "La connessione è già attiva" }

@@ -142,6 +142,77 @@ class WhoopScanner(
         }
     }
 
+    /** Scansione continua che emette tutti i dispositivi candidati trovati (senza chiudere dopo il primo). */
+    fun scanAll(timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS): Flow<WhoopDevice> = callbackFlow {
+        require(timeoutMillis > 0) { "Il timeout scan deve essere positivo" }
+        requireScanPermission()
+
+        val scanner: BluetoothLeScanner = adapter?.bluetoothLeScanner
+            ?: run {
+                close(WhoopScanException("Bluetooth LE non disponibile"))
+                return@callbackFlow
+            }
+        val seen = ConcurrentHashMap.newKeySet<String>()
+
+        val callback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                handleResult(result)
+            }
+
+            override fun onBatchScanResults(results: MutableList<ScanResult>) {
+                results.forEach(::handleResult)
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                close(WhoopScanException("Scansione BLE fallita, codice $errorCode"))
+            }
+
+            private fun handleResult(result: ScanResult) {
+                val device = result.device
+                val advertisedName = result.scanRecord?.deviceName ?: safeDeviceName(device)
+                if (!isWhoopCandidate(result)) return
+                val name = advertisedName ?: "WHOOP 5.0"
+                if (!seen.add(device.address)) return
+
+                trySend(
+                    WhoopDevice(
+                        device = device,
+                        name = name,
+                        rssi = result.rssi,
+                        advertisedServiceUuids = result.scanRecord?.serviceUuids
+                            .orEmpty().mapTo(linkedSetOf()) { it.uuid },
+                    ),
+                )
+            }
+        }
+
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
+        try {
+            scanner.startScan(null, settings, callback)
+        } catch (error: SecurityException) {
+            close(WhoopScanException("Permesso BLUETOOTH_SCAN mancante", error))
+            return@callbackFlow
+        } catch (error: IllegalStateException) {
+            close(WhoopScanException("Impossibile avviare la scansione BLE", error))
+            return@callbackFlow
+        }
+
+        val timeout = launch(start = CoroutineStart.UNDISPATCHED) {
+            delay(timeoutMillis)
+            close()
+        }
+
+        awaitClose {
+            timeout.cancel()
+            try {
+                scanner.stopScan(callback)
+            } catch (_: SecurityException) {
+            }
+        }
+    }
+
     private fun isWhoopCandidate(result: ScanResult): Boolean {
         val uuids = result.scanRecord?.serviceUuids.orEmpty().map { it.uuid }.toSet()
         if (uuids.any { it == WHOOP_16_BIT_SERVICE_UUID || it == WHOOP_SERVICE_UUID }) return true

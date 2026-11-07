@@ -36,7 +36,12 @@ class WhoopBonder(private val context: Context) {
         }
         try {
             android.util.Log.i("BeveltryBLE", "WhoopBonder: createBond() on ${device.address}, bondState=${device.bondState}")
-            if (!device.createBond()) throw pairingInstructions("Android ha rifiutato la richiesta di pairing")
+            if (!device.createBond()) {
+                if (device.bondState == BluetoothDevice.BOND_BONDED) return true
+                if (device.bondState != BluetoothDevice.BOND_BONDING) {
+                    throw pairingInstructions("Android ha rifiutato la richiesta di pairing")
+                }
+            }
             val state = withTimeout(timeoutMillis) { outcome.await() }
             android.util.Log.i("BeveltryBLE", "WhoopBonder: bond outcome state=$state")
             if (state == BluetoothDevice.BOND_BONDED) return true
