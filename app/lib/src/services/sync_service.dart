@@ -16,13 +16,15 @@ enum SyncStatus {
   error,
 }
 
-/// Servizio che orchestra la sincronizzazione e l'offload dati dal WHOOP 5.0.
+/// Servizio che orchestra il ciclo di vita BLE (Scan, Select, Connect/Bond)
+/// e l'offload dati dal WHOOP 5.0.
 ///
 /// Si occupa di:
+/// - Scansionare e filtrare i dispositivi WHOOP 5.0
+/// - Gestire la transizione degli stati BLE: `Idle`, `Scanning`, `Discovered`, `Connecting`, `Bonding`, `Connected`, `Error`
 /// - Avviare il flusso di ricezione frame
 /// - Decodificare i frame `0x2F` tramite [RecordDecoder]
 /// - Salvare i record [V18Record] nel [WhoopRepository]
-/// - Notificare lo stato e il conteggio di avanzamento
 /// - Inviare comandi al cinturino tramite [PuffinTransport] (es. vibrazione 0x42)
 class SyncService {
   SyncService({
@@ -31,8 +33,13 @@ class SyncService {
     Stream<Uint8List>? frameStream,
     this.simulateIfNoHardware = true,
     PuffinTransport? transport,
+    BleConnectionStatus? initialConnectionState,
   })  : _customFrameStream = frameStream,
-        transport = transport ?? SimulatedPuffinTransport();
+        transport = transport ?? SimulatedPuffinTransport() {
+    if (initialConnectionState != null) {
+      connectionStateNotifier.value = initialConnectionState;
+    }
+  }
 
   final WhoopRepository repository;
   final String strapSerial;
@@ -40,14 +47,19 @@ class SyncService {
   final bool simulateIfNoHardware;
   final PuffinTransport transport;
 
+  final ValueNotifier<BleConnectionStatus> connectionStateNotifier =
+      ValueNotifier<BleConnectionStatus>(const BleStatusIdle());
   final ValueNotifier<SyncStatus> statusNotifier =
       ValueNotifier<SyncStatus>(SyncStatus.idle);
   final ValueNotifier<String> statusMessageNotifier =
-      ValueNotifier<String>('Pronto per la sincronizzazione.');
+      ValueNotifier<String>('Pronto per la ricerca o sincronizzazione.');
   final ValueNotifier<int> recordsSavedNotifier = ValueNotifier<int>(0);
 
   bool _isCancelled = false;
   int _commandSeq = 1;
+
+  BleConnectionStatus get connectionState => connectionStateNotifier.value;
+  bool get isConnected => connectionStateNotifier.value.isConnected;
 
   bool get isSyncing =>
       statusNotifier.value == SyncStatus.connecting ||
@@ -57,6 +69,81 @@ class SyncService {
     final s = _commandSeq;
     _commandSeq = (_commandSeq % 255) + 1;
     return s;
+  }
+
+  /// Avvia la scansione BLE filtrando i dispositivi per UUID 0xFD4B o prefisso WBB5AP / 5AG.
+  Future<void> scanForDevices({
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    connectionStateNotifier.value = const BleStatusScanning();
+    statusMessageNotifier.value = '1. Scansione BLE avviata (filtro 0xFD4B / WBB5AP)...';
+
+    try {
+      final stream = transport.scan(timeout: timeout);
+      await for (final devices in stream) {
+        final filtered = devices.where((d) {
+          final n = d.name.toUpperCase();
+          return n.startsWith('WBB5AP') ||
+              n.startsWith('5AG') ||
+              n.contains('WHOOP');
+        }).toList();
+
+        final resultList = filtered.isNotEmpty ? filtered : devices;
+        connectionStateNotifier.value = BleStatusDiscovered(resultList);
+        statusMessageNotifier.value = resultList.isEmpty
+            ? 'Nessun dispositivo WHOOP rilevato in pairing mode.'
+            : 'Trovati ${resultList.length} dispositivi WHOOP.';
+      }
+    } catch (e) {
+      connectionStateNotifier.value = BleStatusError(e.toString());
+      statusMessageNotifier.value = 'Errore scansione BLE: $e';
+    }
+  }
+
+  /// Avvia connessione GATT e procedura di accoppiamento (bonding) autenticato.
+  Future<bool> connectAndBond(WhoopDiscoveredDevice device) async {
+    connectionStateNotifier.value = BleStatusConnecting(device: device);
+    statusMessageNotifier.value =
+        'Connessione e Bonding... Connessione GATT a ${device.name} (${device.macAddress}).';
+
+    try {
+      final success = await transport.connectAndBond(
+        device,
+        onBondingStarted: () {
+          connectionStateNotifier.value = BleStatusBonding(device: device);
+          statusMessageNotifier.value =
+              'Connessione e Bonding... In attesa di autorizzazione pairing dal sistema.';
+        },
+      );
+
+      if (success) {
+        connectionStateNotifier.value = BleStatusConnected(device);
+        statusMessageNotifier.value = 'Connesso a ${device.name}';
+        return true;
+      } else {
+        connectionStateNotifier.value =
+            const BleStatusError('Bonding fallito o annullato');
+        statusMessageNotifier.value =
+            'Bonding fallito o annullato. Riprova verificando il pairing mode (LED blu).';
+        return false;
+      }
+    } catch (e) {
+      connectionStateNotifier.value =
+          BleStatusError('Bonding fallito o annullato: $e');
+      statusMessageNotifier.value = 'Errore durante connect/bond: $e';
+      return false;
+    }
+  }
+
+  /// Disconnette il dispositivo e reimposta lo stato su Idle.
+  Future<void> disconnect() async {
+    try {
+      await transport.disconnect();
+    } finally {
+      connectionStateNotifier.value = const BleStatusIdle();
+      statusNotifier.value = SyncStatus.idle;
+      statusMessageNotifier.value = 'Disconnesso dal dispositivo.';
+    }
   }
 
   /// Invia il comando 0x42 (SET_ALARM_TIME / ALARM_CONTROL) per far vibrare il cinturino.

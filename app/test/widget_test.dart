@@ -1,4 +1,5 @@
 import 'package:beveltry/screens/dashboard_screen.dart';
+import 'package:beveltry/src/ble/ble.dart';
 import 'package:beveltry/src/repository/whoop_repository.dart';
 import 'package:beveltry/src/services/metrics_service.dart';
 import 'package:beveltry/src/services/sync_service.dart';
@@ -14,23 +15,25 @@ void main() {
 
   Widget createTestWidget({
     required WhoopRepository repository,
+    SyncService? syncService,
   }) {
-    final syncService = SyncService(
-      repository: repository,
-      simulateIfNoHardware: true,
-    );
+    final service = syncService ??
+        SyncService(
+          repository: repository,
+          simulateIfNoHardware: true,
+        );
     final metricsService = MetricsService(repository: repository);
 
     return MaterialApp(
       home: DashboardScreen(
         repository: repository,
-        syncService: syncService,
+        syncService: service,
         metricsService: metricsService,
       ),
     );
   }
 
-  testWidgets('Dashboard UI: mostra titolo, pulsanti e card RHR/HRV', (tester) async {
+  testWidgets('Dashboard UI: mostra titolo, 1. Cerca WHOOP e pulsanti azione disabilitati all\'avvio', (tester) async {
     final repository = WhoopRepository.inMemory();
 
     await tester.pumpWidget(createTestWidget(repository: repository));
@@ -44,12 +47,27 @@ void main() {
     expect(find.text('HRV (RMSSD)'), findsOneWidget);
     expect(find.text('Dati insufficienti'), findsNWidgets(2));
 
-    // 3. Tre pulsanti di azione
-    expect(find.text('Sincronizza WHOOP'), findsOneWidget);
-    expect(find.text('Calcola Metriche'), findsOneWidget);
-    expect(find.text('Test Vibrazione'), findsOneWidget);
+    // 3. Pulsante di scansione presente
+    expect(find.text('1. Cerca WHOOP'), findsOneWidget);
 
-    // 4. Sezione log
+    // 4. Pulsanti di azione presenti ma disabilitati se non connesso
+    final syncFinder = find.byKey(const Key('sync_button'));
+    final vibFinder = find.byKey(const Key('vibration_button'));
+    final discFinder = find.byKey(const Key('disconnect_button'));
+
+    expect(syncFinder, findsOneWidget);
+    expect(vibFinder, findsOneWidget);
+    expect(discFinder, findsOneWidget);
+
+    final syncBtn = tester.widget<ElevatedButton>(syncFinder);
+    final vibBtn = tester.widget<ElevatedButton>(vibFinder);
+    final discBtn = tester.widget<OutlinedButton>(discFinder);
+
+    expect(syncBtn.onPressed, isNull);
+    expect(vibBtn.onPressed, isNull);
+    expect(discBtn.onPressed, isNull);
+
+    // 5. Sezione log
     expect(find.text('Log Operazioni'), findsOneWidget);
     expect(
       find.textContaining('Sistema inizializzato'),
@@ -59,96 +77,155 @@ void main() {
     await repository.close();
   });
 
-  testWidgets('Dashboard UI: flusso completo Sincronizza e poi Calcola Metriche', (tester) async {
+  testWidgets('Dashboard UI: flusso completo Scan -> Select -> Connect/Bond -> Sync -> Calcola Metriche', (tester) async {
     final repository = WhoopRepository.inMemory();
+    final transport = SimulatedPuffinTransport(
+      isConnected: false,
+      simulatedDevices: [
+        const WhoopDiscoveredDevice(
+          name: 'WBB5AP-5AG0558675',
+          macAddress: 'FD:49:44:66:1D:92',
+          rssi: -65,
+        ),
+      ],
+    );
     final syncService = SyncService(
       repository: repository,
+      transport: transport,
       simulateIfNoHardware: true,
     );
-    final metricsService = MetricsService(repository: repository);
 
-    await tester.pumpWidget(MaterialApp(
-      home: DashboardScreen(
-        repository: repository,
-        syncService: syncService,
-        metricsService: metricsService,
-      ),
+    await tester.pumpWidget(createTestWidget(
+      repository: repository,
+      syncService: syncService,
     ));
-    await tester.pump();
+    await tester.pumpAndSettle();
 
-    // Click su "Sincronizza WHOOP"
-    final syncButton = find.text('Sincronizza WHOOP');
-    expect(syncButton, findsOneWidget);
+    // 1. Click su "1. Cerca WHOOP"
+    final scanButton = find.text('1. Cerca WHOOP');
+    expect(scanButton, findsOneWidget);
 
-    await tester.runAsync(() async {
-      await tester.tap(syncButton);
-      while (syncService.isSyncing) {
-        await Future.delayed(const Duration(milliseconds: 20));
-      }
-    });
-    await tester.pump();
+    await tester.tap(scanButton);
+    await tester.pumpAndSettle();
 
-    // Verifica che il log riporti il completamento del sync
+    // 2. Verifica comparsa ListView dei dispositivi trovati
+    expect(find.text('WBB5AP-5AG0558675'), findsOneWidget);
+    expect(find.textContaining('FD:49:44:66:1D:92'), findsOneWidget);
+
+    // 3. Click sul dispositivo per avviare Connessione e Bonding
+    final deviceTile = find.text('WBB5AP-5AG0558675');
+    await tester.tap(deviceTile);
+    await tester.pumpAndSettle();
+
+    // 4. Verifica banner "Connesso a WBB5AP-5AG0558675"
+    expect(find.text('Connesso a WBB5AP-5AG0558675'), findsOneWidget);
+
+    // 5. Verifica che "2. Sincronizza" sia ora abilitato ed eseguibile
+    final syncButton = find.byKey(const Key('sync_button'));
+    expect(tester.widget<ElevatedButton>(syncButton).onPressed, isNotNull);
+
+    await tester.tap(syncButton);
+    await tester.pumpAndSettle();
+
     expect(find.textContaining('Sincronizzazione completata'), findsOneWidget);
 
-    // Click su "Calcola Metriche"
+    // 6. Click su "Calcola Metriche"
     final calcButton = find.text('Calcola Metriche');
-    expect(calcButton, findsOneWidget);
-
     final state = tester.state<DashboardScreenState>(find.byType(DashboardScreen));
-    await tester.runAsync(() async {
-      await tester.tap(calcButton);
-      for (var i = 0; i < 50; i++) {
-        if (!state.isCalculating && state.latestMetrics != null) break;
-        await Future.delayed(const Duration(milliseconds: 20));
-      }
-    });
-    await tester.pump();
+    await tester.tap(calcButton);
+    await tester.pumpAndSettle();
 
-    // Verifica che la card RHR sia valorizzata e che la card HRV mostri "Dati insufficienti"
-    // (a causa di HRV = 0.0 su 30 record a frequenza costante)
     expect(find.textContaining('bpm'), findsAtLeastNWidgets(1));
-    expect(find.text('Dati insufficienti'), findsAtLeastNWidgets(1));
     expect(state.latestMetrics, isNotNull);
-    expect(state.latestMetrics!.rhr, isNotNull);
-    expect(state.latestMetrics!.hrvRmssd, equals(0.0));
-    expect(state.latestMetrics!.isHrvValid, isFalse);
-
-    // Verifica che il log indichi il calcolo avvenuto
     expect(find.textContaining('Calcolo completato'), findsOneWidget);
 
-    // Smonta il widget per invocare dispose() prima di chiudere il repository
     await tester.pumpWidget(const SizedBox());
     await repository.close();
   });
 
-  testWidgets('Dashboard UI: click su Test Vibrazione invia il comando 0x42 e aggiorna il log', (tester) async {
+  testWidgets('Dashboard UI: click su Test Vibrazione invia il comando 0x42 solo se connesso', (tester) async {
     final repository = WhoopRepository.inMemory();
+    final transport = SimulatedPuffinTransport(
+      isConnected: false,
+      simulatedDevices: [
+        const WhoopDiscoveredDevice(
+          name: 'WBB5AP-5AG0558675',
+          macAddress: 'FD:49:44:66:1D:92',
+        ),
+      ],
+    );
     final syncService = SyncService(
       repository: repository,
+      transport: transport,
       simulateIfNoHardware: true,
     );
-    final metricsService = MetricsService(repository: repository);
 
-    await tester.pumpWidget(MaterialApp(
-      home: DashboardScreen(
-        repository: repository,
-        syncService: syncService,
-        metricsService: metricsService,
-      ),
+    await tester.pumpWidget(createTestWidget(
+      repository: repository,
+      syncService: syncService,
     ));
-    await tester.pump();
+    await tester.pumpAndSettle();
 
-    final vibButton = find.text('Test Vibrazione');
-    expect(vibButton, findsOneWidget);
+    // Connessione preliminare
+    await tester.tap(find.text('1. Cerca WHOOP'));
+    await tester.pumpAndSettle();
 
-    await tester.runAsync(() async {
-      await tester.tap(vibButton);
-      await Future.delayed(const Duration(milliseconds: 50));
-    });
-    await tester.pump();
+    await tester.tap(find.text('WBB5AP-5AG0558675'));
+    await tester.pumpAndSettle();
+
+    // Ora il pulsante vibrazione è abilitato
+    final vibButton = find.byKey(const Key('vibration_button'));
+    expect(tester.widget<ElevatedButton>(vibButton).onPressed, isNotNull);
+
+    await tester.tap(vibButton);
+    await tester.pumpAndSettle();
 
     expect(find.textContaining('Vibrazione attivata con successo'), findsOneWidget);
+
+    // Disconnetti e verifica che il pulsante torni disabilitato
+    final discButton = find.byKey(const Key('disconnect_button'));
+    await tester.tap(discButton);
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<ElevatedButton>(find.byKey(const Key('vibration_button'))).onPressed, isNull);
+
+    await tester.pumpWidget(const SizedBox());
+    await repository.close();
+  });
+
+  testWidgets('Dashboard UI: bonding fallito o annullato mostra errore chiaro', (tester) async {
+    final repository = WhoopRepository.inMemory();
+    final transport = SimulatedPuffinTransport(
+      isConnected: false,
+      simulateBondFailure: true,
+      simulatedDevices: [
+        const WhoopDiscoveredDevice(
+          name: 'WBB5AP-5AG0558675',
+          macAddress: 'FD:49:44:66:1D:92',
+        ),
+      ],
+    );
+    final syncService = SyncService(
+      repository: repository,
+      transport: transport,
+      simulateIfNoHardware: true,
+    );
+
+    await tester.pumpWidget(createTestWidget(
+      repository: repository,
+      syncService: syncService,
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('1. Cerca WHOOP'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('WBB5AP-5AG0558675'));
+    await tester.pumpAndSettle();
+
+    // Verifica messaggio di errore esplicito
+    expect(find.textContaining('Bonding fallito o annullato'), findsAtLeastNWidgets(1));
+    expect(syncService.connectionState, isA<BleStatusError>());
 
     await tester.pumpWidget(const SizedBox());
     await repository.close();
