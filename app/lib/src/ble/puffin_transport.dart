@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'ble_connection_state.dart';
+import 'puffin_frame_codec.dart';
 
 /// Characteristic GATT utilizzate dal servizio Puffin Gen 5 (`fd4b`).
 enum PuffinCharacteristic {
@@ -11,8 +13,22 @@ enum PuffinCharacteristic {
   memfault,
 }
 
+/// Contenitore per un frame Puffin ricevuto e la caratteristica sorgente.
+class PuffinIncomingFrame {
+  const PuffinIncomingFrame({
+    required this.frame,
+    required this.characteristic,
+  });
+
+  final PuffinFrame frame;
+  final PuffinCharacteristic characteristic;
+}
+
 /// Contratto per il trasporto BLE di basso livello verso il WHOOP 5.0.
 abstract class PuffinTransport {
+  /// Stream di tutti i frame Puffin decodificati con la caratteristica sorgente.
+  Stream<PuffinIncomingFrame> get incomingFrames;
+
   /// Invia un frame binario envelope al cinturino.
   Future<void> write(
     Uint8List frame, {
@@ -53,6 +69,24 @@ class SimulatedPuffinTransport implements PuffinTransport {
                 rssi: -62,
               ),
             ];
+
+  final _incomingFramesController =
+      StreamController<PuffinIncomingFrame>.broadcast();
+
+  @override
+  Stream<PuffinIncomingFrame> get incomingFrames =>
+      _incomingFramesController.stream;
+
+  /// Emette un frame simulato nello stream in ingresso.
+  void emitFrame(
+    PuffinFrame frame, [
+    PuffinCharacteristic characteristic = PuffinCharacteristic.cmdFromStrap,
+  ]) {
+    _incomingFramesController.add(PuffinIncomingFrame(
+      frame: frame,
+      characteristic: characteristic,
+    ));
+  }
 
   @override
   bool isConnected;

@@ -190,10 +190,18 @@ class DashboardScreenState extends State<DashboardScreen> {
         pattern: 1,
         durationMs: 1000,
       );
+      final statusByte = _syncService.lastVibrationStatusNotifier.value;
+      final statusHex = statusByte != null
+          ? '0x${statusByte.toRadixString(16).padLeft(2, '0').toUpperCase()}'
+          : 'N/A';
       if (success) {
-        _addLog('Vibrazione attivata con successo sul cinturino (0x42).');
+        _addLog(
+          'Vibrazione attivata con successo sul cinturino (0x42)! Status ACK: $statusHex.',
+        );
       } else {
-        _addLog('Impossibile attivare la vibrazione: trasporto non connesso.');
+        _addLog(
+          'Vibrazione non riuscita o rifiutata dal cinturino (Status: $statusHex).',
+        );
       }
     } catch (e) {
       _addLog('Errore durante l\'invio della vibrazione: $e');
@@ -392,9 +400,12 @@ class DashboardScreenState extends State<DashboardScreen> {
                   );
                 },
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
 
-              // 4. Log delle Operazioni a schermo
+              // 4. Riquadro Telemetria Live & Record v18 in tempo reale
+              _buildLiveTelemetrySection(),
+
+              // 5. Log delle Operazioni a schermo
               const Text(
                 'Log Operazioni',
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
@@ -450,22 +461,46 @@ class DashboardScreenState extends State<DashboardScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 14.0, vertical: 10.0),
           child: Row(
             children: [
-              const Icon(Icons.check_circle, color: Colors.greenAccent, size: 24),
+              const Icon(Icons.verified, color: Colors.greenAccent, size: 26),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'Connesso a ${status.device.name}',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
-                        color: Colors.greenAccent,
-                      ),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            'Connesso a ${status.device.name}',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                              color: Colors.greenAccent,
+                            ),
+                          ),
+                        ),
+                        if (status.isHardwareVerified) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.green.shade800,
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: const Text(
+                              'VERIFICATO HARDWARE',
+                              style: TextStyle(
+                                fontSize: 9,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                     Text(
-                      'MAC: ${status.device.macAddress} | Pronto per sincronizzazione e comandi',
+                      'MAC: ${status.device.macAddress} | Sessione sbloccata (Handshake OK)',
                       style: TextStyle(
                         fontSize: 11,
                         color: Colors.grey.shade400,
@@ -656,6 +691,121 @@ class DashboardScreenState extends State<DashboardScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildLiveTelemetrySection() {
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        _syncService.recordsSavedNotifier,
+        _syncService.lastTimestampNotifier,
+        _syncService.lastHrNotifier,
+        _syncService.lastSkinTempNotifier,
+        _syncService.lastRrNotifier,
+        _syncService.liveHrNotifier,
+        _syncService.lastVibrationStatusNotifier,
+      ]),
+      builder: (context, _) {
+        final recordsSaved = _syncService.recordsSavedNotifier.value;
+        final liveHr = _syncService.liveHrNotifier.value;
+        final lastHr = _syncService.lastHrNotifier.value;
+        final lastTs = _syncService.lastTimestampNotifier.value;
+        final temp = _syncService.lastSkinTempNotifier.value;
+        final rr = _syncService.lastRrNotifier.value;
+        final vibStatus = _syncService.lastVibrationStatusNotifier.value;
+
+        if (recordsSaved == 0 && liveHr == null && vibStatus == null) {
+          return const SizedBox.shrink();
+        }
+
+        return Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.blueGrey.shade900.withValues(alpha: 0.35),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.teal.shade700),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'Telemetria WHOOP Hardware',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                      color: Colors.tealAccent,
+                    ),
+                  ),
+                  if (liveHr != null)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.red.shade900,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.redAccent),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.favorite, size: 12, color: Colors.white),
+                          const SizedBox(width: 4),
+                          Text(
+                            '$liveHr BPM (Live 0x28)',
+                            style: const TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 12,
+                runSpacing: 6,
+                children: [
+                  Text(
+                    'Pacchetti 0x2F v18: $recordsSaved',
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                  ),
+                  if (lastHr != null)
+                    Text(
+                      'BPM Storico: $lastHr',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  if (temp != null)
+                    Text(
+                      'Temp Pelle: ${temp.toStringAsFixed(1)}°C',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  if (rr != null && rr.isNotEmpty)
+                    Text(
+                      'RR: ${rr.join(", ")} ms',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  if (lastTs != null)
+                    Text(
+                      'Ultimo TS: ${lastTs.toLocal().toString().split(".")[0]}',
+                      style: TextStyle(fontSize: 11, color: Colors.grey.shade400),
+                    ),
+                  if (vibStatus != null)
+                    Text(
+                      'Status Haptics: 0x${vibStatus.toRadixString(16).padLeft(2, '0').toUpperCase()}',
+                      style: const TextStyle(fontSize: 12, color: Colors.orangeAccent),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

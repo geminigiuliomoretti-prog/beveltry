@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'screens/dashboard_screen.dart';
@@ -10,13 +9,11 @@ import 'src/services/sync_service.dart';
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   final repository = WhoopRepository();
-  final transport = defaultTargetPlatform == TargetPlatform.android
-      ? MethodChannelPuffinTransport()
-      : SimulatedPuffinTransport();
+  final transport = BlePuffinTransport();
   final syncService = SyncService(
     repository: repository,
     transport: transport,
-    simulateIfNoHardware: defaultTargetPlatform != TargetPlatform.android,
+    simulateIfNoHardware: false,
   );
   final metricsService = MetricsService(repository: repository);
 

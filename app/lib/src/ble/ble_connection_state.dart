@@ -84,11 +84,14 @@ class BleStatusBonding extends BleConnectionStatus {
 
 /// Accoppiamento completato e trasporto pronto allo scambio frame.
 class BleStatusConnected extends BleConnectionStatus {
-  const BleStatusConnected(this.device);
+  const BleStatusConnected(this.device, {this.isHardwareVerified = true});
   final WhoopDiscoveredDevice device;
+  final bool isHardwareVerified;
 
   @override
-  String toString() => 'Connected(${device.name})';
+  String toString() => isHardwareVerified
+      ? 'Connected(Verificato Hardware: ${device.name})'
+      : 'Connected(${device.name})';
 }
 
 /// Errore durante la scansione, connessione o autorizzazione di bonding.

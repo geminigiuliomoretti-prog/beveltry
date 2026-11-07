@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 
 import 'ble_connection_state.dart';
+import 'puffin_frame_codec.dart';
 import 'puffin_transport.dart';
 
 /// Implementazione concreta di [PuffinTransport] che comunica tramite
@@ -21,10 +22,12 @@ class MethodChannelPuffinTransport implements PuffinTransport {
       StreamController<List<WhoopDiscoveredDevice>>.broadcast();
   final List<WhoopDiscoveredDevice> _discoveredList = [];
 
-  final StreamController<Uint8List> _incomingFramesController =
-      StreamController<Uint8List>.broadcast();
+  final StreamController<PuffinIncomingFrame> _incomingFramesController =
+      StreamController<PuffinIncomingFrame>.broadcast();
 
-  Stream<Uint8List> get incomingFrames => _incomingFramesController.stream;
+  @override
+  Stream<PuffinIncomingFrame> get incomingFrames =>
+      _incomingFramesController.stream;
 
   void Function()? _onBondingStartedCallback;
 
@@ -51,8 +54,26 @@ class MethodChannelPuffinTransport implements PuffinTransport {
       case 'onFrameReceived':
         final map = Map<String, dynamic>.from(call.arguments as Map);
         final rawBytes = map['payload'] as Uint8List?;
+        final charStr = map['characteristic'] as String?;
+        final field = map['field'] as int? ?? 1;
         if (rawBytes != null) {
-          _incomingFramesController.add(rawBytes);
+          final char = switch (charStr) {
+            'CMD_FROM_STRAP' || 'cmdFromStrap' => PuffinCharacteristic.cmdFromStrap,
+            'EVENTS_FROM_STRAP' || 'eventsFromStrap' => PuffinCharacteristic.eventsFromStrap,
+            'DATA_FROM_STRAP' || 'dataFromStrap' => PuffinCharacteristic.dataFromStrap,
+            'MEMFAULT' || 'memfault' => PuffinCharacteristic.memfault,
+            _ => PuffinCharacteristic.cmdFromStrap,
+          };
+          final frame = PuffinFrame(
+            field: field,
+            payload: rawBytes,
+            rawPayload: rawBytes,
+            headerCRC: 0,
+            payloadCRC: 0,
+          );
+          _incomingFramesController.add(
+            PuffinIncomingFrame(frame: frame, characteristic: char),
+          );
         }
       case 'onDisconnected':
         _isConnected = false;
