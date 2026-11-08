@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:universal_ble/universal_ble.dart';
 
 import '../ble/ble.dart';
 import '../records/live28_record.dart';
@@ -142,7 +143,7 @@ class SyncService {
         return false;
       }
 
-      // Esecuzione Handshake Puffin Hardware per sbloccare la sessione del WHOOP
+      // 5. Solo dopo il bonding completato, inviare i comandi di handshake
       if (transport is! SimulatedPuffinTransport) {
         statusMessageNotifier.value = 'Esecuzione Handshake di autenticazione con il WHOOP...';
         final handshake = DartPuffinHandshake(
@@ -157,7 +158,22 @@ class SyncService {
       connectionStateNotifier.value = BleStatusConnected(device, isHardwareVerified: true);
       statusMessageNotifier.value = 'Connesso a ${device.name} (Verificato Hardware)';
       return true;
+    } on BleBondException catch (e) {
+      connectionStateNotifier.value =
+          BleStatusError('Bonding fallito o annullato: ${e.message}');
+      statusMessageNotifier.value =
+          'Bonding fallito o annullato. Riprova verificando il pairing mode (LED blu).';
+      return false;
     } catch (e) {
+      if (e.toString().contains('Bonding fallito o annullato') ||
+          e.toString().contains('BOND_FAILED') ||
+          e.toString().contains('PairingException')) {
+        connectionStateNotifier.value =
+            const BleStatusError('Bonding fallito o annullato');
+        statusMessageNotifier.value =
+            'Bonding fallito o annullato. Riprova verificando il pairing mode (LED blu).';
+        return false;
+      }
       connectionStateNotifier.value =
           BleStatusError('Connessione o Handshake fallito: $e');
       statusMessageNotifier.value = 'Errore durante connect/handshake: $e';

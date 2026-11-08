@@ -19,6 +19,15 @@ abstract class WhoopBleUuids {
   static const String heartRateMeasurement = '00002a37-0000-1000-8000-00805f9b34fb';
 }
 
+/// Eccezione sollevata quando la procedura di accoppiamento/bonding di sistema fallisce o viene rifiutata.
+class BleBondException implements Exception {
+  BleBondException(this.message);
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 /// Implementazione concreta multipiattaforma (Windows, Android, iOS, macOS, Linux)
 /// di [PuffinTransport] basata su [UniversalBle].
 ///
@@ -181,6 +190,7 @@ class BlePuffinTransport implements PuffinTransport {
     WhoopDiscoveredDevice device, {
     void Function()? onBondingStarted,
   }) async {
+    // 1. Fermare la scansione prima di connettersi
     try {
       await UniversalBle.stopScan();
     } catch (_) {}
@@ -190,34 +200,48 @@ class BlePuffinTransport implements PuffinTransport {
     _connectedDevice = device;
 
     try {
-      // 1. Connessione GATT
+      // 2. Connessione GATT con trasporto LE (default in UniversalBle per Android)
       await UniversalBle.connect(
         mac,
         timeout: const Duration(seconds: 30),
       );
 
-      // 2. Richiesta MTU ottimale (512 byte)
+      // Richiesta MTU ottimale (512 byte)
       try {
         await UniversalBle.requestMtu(mac, 512);
       } catch (_) {
         // MTU non negoziabile su tutti i controller, prosegue
       }
 
-      // 3. Procedura di Bonding / Pairing autenticato
-      onBondingStarted?.call();
+      // 3. Avviare il bonding e attendere il completamento (BOND_BONDED)
+      bool isAlreadyBonded = false;
       try {
-        final isPaired = await UniversalBle.isPaired(mac);
-        if (isPaired != true) {
-          await UniversalBle.pair(mac);
-        }
+        isAlreadyBonded = (await UniversalBle.isPaired(mac)) == true;
       } catch (_) {
-        // Ignora eccezioni non bloccanti (es. periferica già associata dall'OS)
+        // Ignora eccezioni non bloccanti
       }
 
-      // 4. Scoperta Servizi GATT
+      if (!isAlreadyBonded) {
+        onBondingStarted?.call();
+        try {
+          await UniversalBle.pair(mac, timeout: const Duration(seconds: 35));
+        } catch (pairErr) {
+          throw BleBondException('Bonding fallito o annullato: $pairErr');
+        }
+
+        // 4. Verificare che lo stato finale sia BOND_BONDED
+        if (BleCapabilities.hasSystemPairingApi) {
+          final isBondedNow = await UniversalBle.isPaired(mac);
+          if (isBondedNow != true) {
+            throw BleBondException('Bonding non completato (stato non BOND_BONDED)');
+          }
+        }
+      }
+
+      // 5. Scoperta Servizi GATT (solo dopo bonding completato)
       await UniversalBle.discoverServices(mac);
 
-      // 5. Sottoscrizione notifiche caratteristiche WHOOP 5.0
+      // Sottoscrizione notifiche caratteristiche WHOOP 5.0
       await UniversalBle.subscribeNotifications(
         mac,
         WhoopBleUuids.puffinService,
@@ -249,6 +273,9 @@ class BlePuffinTransport implements PuffinTransport {
     } catch (e) {
       _isConnected = false;
       _connectedDevice = null;
+      try {
+        await UniversalBle.disconnect(mac);
+      } catch (_) {}
       rethrow;
     }
   }

@@ -11,6 +11,7 @@ class MockPuffinTransport implements PuffinTransport {
 
   @override
   bool isConnected;
+  bool simulateBondException = false;
 
   final List<Uint8List> writtenFrames = [];
   final List<PuffinCharacteristic> writtenCharacteristics = [];
@@ -67,6 +68,10 @@ class MockPuffinTransport implements PuffinTransport {
     void Function()? onBondingStarted,
   }) async {
     onBondingStarted?.call();
+    if (simulateBondException) {
+      isConnected = false;
+      throw BleBondException('Bonding fallito o annullato: timeout');
+    }
     isConnected = true;
     return true;
   }
@@ -326,6 +331,16 @@ void main() {
 
       syncService.stopSync();
       await syncFuture;
+    });
+
+    test('BleBondException imposta stato BleStatusError e messaggio chiaro', () async {
+      transport.simulateBondException = true;
+      const device = WhoopDiscoveredDevice(name: 'WHOOP', macAddress: 'AA:BB:CC:DD:EE:FF');
+      final result = await syncService.connectAndBond(device);
+      expect(result, isFalse);
+      expect(syncService.connectionState, isA<BleStatusError>());
+      expect((syncService.connectionState as BleStatusError).message, contains('Bonding fallito o annullato'));
+      expect(syncService.statusMessageNotifier.value, contains('Bonding fallito o annullato'));
     });
   });
 }
