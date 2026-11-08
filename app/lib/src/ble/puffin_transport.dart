@@ -48,6 +48,7 @@ abstract class PuffinTransport {
   Future<bool> connectAndBond(
     WhoopDiscoveredDevice device, {
     void Function()? onBondingStarted,
+    void Function(String message)? onRetryProgress,
   }) async =>
       true;
 
@@ -61,6 +62,8 @@ class SimulatedPuffinTransport implements PuffinTransport {
     this.isConnected = true,
     List<WhoopDiscoveredDevice>? simulatedDevices,
     this.simulateBondFailure = false,
+    this.simulate133FailuresBeforeSuccess = 0,
+    this.simulatePersistent133 = false,
   }) : simulatedDevices = simulatedDevices ??
             [
               const WhoopDiscoveredDevice(
@@ -100,6 +103,15 @@ class SimulatedPuffinTransport implements PuffinTransport {
   /// Se true, simula il rifiuto o annullamento del pairing di sistema.
   bool simulateBondFailure;
 
+  /// Conteggio dei tentativi di connessione effettuati.
+  int connectAttempts = 0;
+
+  /// Quante volte simulare un errore GATT 133 prima di completare con successo.
+  int simulate133FailuresBeforeSuccess = 0;
+
+  /// Se true, simula un errore persistente GATT 133 (superando tutti i retry).
+  bool simulatePersistent133 = false;
+
   /// Registro dei frame inviati durante la sessione.
   final List<Uint8List> sentFrames = [];
 
@@ -122,7 +134,15 @@ class SimulatedPuffinTransport implements PuffinTransport {
   Future<bool> connectAndBond(
     WhoopDiscoveredDevice device, {
     void Function()? onBondingStarted,
+    void Function(String message)? onRetryProgress,
   }) async {
+    connectAttempts++;
+    if (simulatePersistent133 || connectAttempts <= simulate133FailuresBeforeSuccess) {
+      throw StateError(
+        'UniversalBleException: Code: UniversalBleErrorCode.unknownError, Message: Unknown Error 133',
+      );
+    }
+
     onBondingStarted?.call();
     if (simulateBondFailure) {
       isConnected = false;

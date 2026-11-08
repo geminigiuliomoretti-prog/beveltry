@@ -185,99 +185,131 @@ class BlePuffinTransport implements PuffinTransport {
     }
   }
 
+  static bool _isGatt133Error(Object error) {
+    final str = error.toString().toLowerCase();
+    return str.contains('133');
+  }
+
   @override
   Future<bool> connectAndBond(
     WhoopDiscoveredDevice device, {
     void Function()? onBondingStarted,
+    void Function(String message)? onRetryProgress,
+    int maxRetries = 3,
+    Duration retryDelay = const Duration(seconds: 2),
   }) async {
-    // 1. Fermare la scansione prima di connettersi
-    try {
-      await UniversalBle.stopScan();
-    } catch (_) {}
-
-    _resetReassemblers();
     final mac = device.macAddress;
-    _connectedDevice = device;
 
-    try {
-      // 2. Connessione GATT con trasporto LE (default in UniversalBle per Android)
-      await UniversalBle.connect(
-        mac,
-        timeout: const Duration(seconds: 30),
-      );
-
-      // Richiesta MTU ottimale (512 byte)
+    for (var attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        await UniversalBle.requestMtu(mac, 512);
-      } catch (_) {
-        // MTU non negoziabile su tutti i controller, prosegue
-      }
-
-      // 3. Avviare il bonding e attendere il completamento (BOND_BONDED)
-      bool isAlreadyBonded = false;
-      try {
-        isAlreadyBonded = (await UniversalBle.isPaired(mac)) == true;
-      } catch (_) {
-        // Ignora eccezioni non bloccanti
-      }
-
-      if (!isAlreadyBonded) {
-        onBondingStarted?.call();
+        // 1. Fermare la scansione prima di connettersi
         try {
-          await UniversalBle.pair(mac, timeout: const Duration(seconds: 35));
-        } catch (pairErr) {
-          throw BleBondException('Bonding fallito o annullato: $pairErr');
+          await UniversalBle.stopScan();
+        } catch (_) {}
+
+        _resetReassemblers();
+        _connectedDevice = device;
+
+        // 2. Connessione GATT con trasporto LE (30s)
+        await UniversalBle.connect(
+          mac,
+          timeout: const Duration(seconds: 30),
+        );
+
+        // Richiesta MTU ottimale (512 byte)
+        try {
+          await UniversalBle.requestMtu(mac, 512);
+        } catch (_) {
+          // MTU non negoziabile su tutti i controller, prosegue
         }
 
-        // 4. Verificare che lo stato finale sia BOND_BONDED
-        if (BleCapabilities.hasSystemPairingApi) {
-          final isBondedNow = await UniversalBle.isPaired(mac);
-          if (isBondedNow != true) {
-            throw BleBondException('Bonding non completato (stato non BOND_BONDED)');
+        // 3. Avviare il bonding e attendere il completamento (BOND_BONDED)
+        bool isAlreadyBonded = false;
+        try {
+          isAlreadyBonded = (await UniversalBle.isPaired(mac)) == true;
+        } catch (_) {
+          // Ignora eccezioni non bloccanti
+        }
+
+        if (!isAlreadyBonded) {
+          onBondingStarted?.call();
+          try {
+            await UniversalBle.pair(mac, timeout: const Duration(seconds: 35));
+          } catch (pairErr) {
+            throw BleBondException('Bonding fallito o annullato: $pairErr');
+          }
+
+          // 4. Verificare che lo stato finale sia BOND_BONDED
+          if (BleCapabilities.hasSystemPairingApi) {
+            final isBondedNow = await UniversalBle.isPaired(mac);
+            if (isBondedNow != true) {
+              throw BleBondException('Bonding non completato (stato non BOND_BONDED)');
+            }
           }
         }
-      }
 
-      // 5. Scoperta Servizi GATT (solo dopo bonding completato)
-      await UniversalBle.discoverServices(mac);
+        // 5. Scoperta Servizi GATT (solo dopo bonding completato)
+        await UniversalBle.discoverServices(mac);
 
-      // Sottoscrizione notifiche caratteristiche WHOOP 5.0
-      await UniversalBle.subscribeNotifications(
-        mac,
-        WhoopBleUuids.puffinService,
-        WhoopBleUuids.cmdFromStrap,
-      );
-      await UniversalBle.subscribeNotifications(
-        mac,
-        WhoopBleUuids.puffinService,
-        WhoopBleUuids.eventsFromStrap,
-      );
-      await UniversalBle.subscribeNotifications(
-        mac,
-        WhoopBleUuids.puffinService,
-        WhoopBleUuids.dataFromStrap,
-      );
-
-      try {
+        // Sottoscrizione notifiche caratteristiche WHOOP 5.0
         await UniversalBle.subscribeNotifications(
           mac,
-          WhoopBleUuids.heartRateService,
-          WhoopBleUuids.heartRateMeasurement,
+          WhoopBleUuids.puffinService,
+          WhoopBleUuids.cmdFromStrap,
         );
-      } catch (_) {
-        // Servizio standard 0x180D opzionale rispetto al flusso proprietario
-      }
+        await UniversalBle.subscribeNotifications(
+          mac,
+          WhoopBleUuids.puffinService,
+          WhoopBleUuids.eventsFromStrap,
+        );
+        await UniversalBle.subscribeNotifications(
+          mac,
+          WhoopBleUuids.puffinService,
+          WhoopBleUuids.dataFromStrap,
+        );
 
-      _isConnected = true;
-      return true;
-    } catch (e) {
-      _isConnected = false;
-      _connectedDevice = null;
-      try {
-        await UniversalBle.disconnect(mac);
-      } catch (_) {}
-      rethrow;
+        try {
+          await UniversalBle.subscribeNotifications(
+            mac,
+            WhoopBleUuids.heartRateService,
+            WhoopBleUuids.heartRateMeasurement,
+          );
+        } catch (_) {
+          // Servizio standard 0x180D opzionale rispetto al flusso proprietario
+        }
+
+        _isConnected = true;
+        return true;
+      } catch (e) {
+        _isConnected = false;
+        _connectedDevice = null;
+
+        // Chiudere esplicitamente il GATT in caso di errore
+        try {
+          await UniversalBle.disconnect(mac);
+        } catch (_) {}
+
+        // Se errore di bonding esplicito, interrompi subito senza retry generico
+        if (e is BleBondException) {
+          rethrow;
+        }
+
+        // Se errore 133 e rimangono tentativi, chiude GATT, attende 2 secondi e riprova
+        final is133 = _isGatt133Error(e);
+        if (is133 && attempt < maxRetries) {
+          onRetryProgress?.call(
+            'Errore GATT 133 rilevato al tentativo $attempt/$maxRetries. '
+            'GATT chiuso. Attesa di ${retryDelay.inSeconds} secondi prima del prossimo tentativo...',
+          );
+          await Future<void>.delayed(retryDelay);
+          continue;
+        }
+
+        rethrow;
+      }
     }
+
+    return false;
   }
 
   @override

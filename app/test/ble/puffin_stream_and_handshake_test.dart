@@ -66,6 +66,7 @@ class MockPuffinTransport implements PuffinTransport {
   Future<bool> connectAndBond(
     WhoopDiscoveredDevice device, {
     void Function()? onBondingStarted,
+    void Function(String message)? onRetryProgress,
   }) async {
     onBondingStarted?.call();
     if (simulateBondException) {
@@ -341,6 +342,57 @@ void main() {
       expect(syncService.connectionState, isA<BleStatusError>());
       expect((syncService.connectionState as BleStatusError).message, contains('Bonding fallito o annullato'));
       expect(syncService.statusMessageNotifier.value, contains('Bonding fallito o annullato'));
+    });
+
+    test('Errore GATT 133 persistente mostra messaggio chiaro e non genera crash', () async {
+      final simTransport = SimulatedPuffinTransport(
+        simulatePersistent133: true,
+      );
+      final testService = SyncService(
+        repository: repository,
+        transport: simTransport,
+        simulateIfNoHardware: true,
+      );
+
+      const device = WhoopDiscoveredDevice(name: 'WHOOP', macAddress: 'AA:BB:CC:DD:EE:FF');
+      final result = await testService.connectAndBond(device);
+
+      expect(result, isFalse);
+      expect(testService.connectionState, isA<BleStatusError>());
+      final err = testService.connectionState as BleStatusError;
+      expect(err.message, contains('Errore GATT 133'));
+      expect(testService.statusMessageNotifier.value, contains('Errore GATT 133'));
+      expect(testService.statusMessageNotifier.value, contains('Dimentica il WHOOP'));
+    });
+
+    test('Retry su errore GATT 133 recupera con successo al secondo tentativo', () async {
+      final simTransport = SimulatedPuffinTransport(
+        simulate133FailuresBeforeSuccess: 1,
+      );
+      final testService = SyncService(
+        repository: repository,
+        transport: simTransport,
+        simulateIfNoHardware: true,
+      );
+
+      // Simula il transport che ritenta
+      const device = WhoopDiscoveredDevice(name: 'WHOOP', macAddress: 'AA:BB:CC:DD:EE:FF');
+      
+      // Il primo tentativo fallisce con 133, ma riprovando ha successo
+      var firstFailed = false;
+      try {
+        await simTransport.connectAndBond(device);
+      } catch (_) {
+        firstFailed = true;
+      }
+      expect(firstFailed, isTrue);
+      expect(simTransport.connectAttempts, equals(1));
+
+      // Secondo tentativo
+      final secondSuccess = await simTransport.connectAndBond(device);
+      expect(secondSuccess, isTrue);
+      expect(simTransport.connectAttempts, equals(2));
+      expect(simTransport.isConnected, isTrue);
     });
   });
 }

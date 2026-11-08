@@ -105,6 +105,7 @@ class MethodChannelPuffinTransport implements PuffinTransport {
   Future<bool> connectAndBond(
     WhoopDiscoveredDevice device, {
     void Function()? onBondingStarted,
+    void Function(String message)? onRetryProgress,
   }) async {
     _onBondingStartedCallback = onBondingStarted;
     try {

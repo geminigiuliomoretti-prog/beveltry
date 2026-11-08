@@ -125,23 +125,41 @@ class AndroidPuffinTransport(
         onBondingStarted: () -> Unit = {},
         timeoutMillis: Long = 60_000,
     ) {
-        connectAndAwaitReady(device, timeoutMillis = 30_000)
-        onBondingStarted()
-        val bonded = bonder.bond(device, timeoutMillis)
-        if (!bonded) {
-            disconnect()
-            throw WhoopBondException("Bonding non completato o rifiutato")
+        var lastError: Exception? = null
+        for (attempt in 1..3) {
+            try {
+                connectAndAwaitReady(device, timeoutMillis = 30_000)
+                onBondingStarted()
+                val bonded = bonder.bond(device, timeoutMillis)
+                if (!bonded) {
+                    disconnect()
+                    throw WhoopBondException("Bonding non completato o rifiutato")
+                }
+
+                subscribe(PuffinCharacteristic.CMD_FROM_STRAP)
+                subscribe(PuffinCharacteristic.EVENTS_FROM_STRAP)
+                subscribe(PuffinCharacteristic.DATA_FROM_STRAP)
+
+                // HELLO (0x91) conferma l'accoppiamento autenticato al firmware e spegne il LED blu
+                val helloSeq = 1
+                val helloPayload = byteArrayOf(0x23, helloSeq.toByte(), 0x91.toByte(), 0x01)
+                val frame = PuffinFrameCodec.encode(field = 0x0100, helloPayload)
+                write(frame, PuffinCharacteristic.CMD_TO_STRAP)
+                return
+            } catch (e: Exception) {
+                lastError = e
+                disconnect()
+                if (e is WhoopBondException) throw e
+                val is133 = e.message?.contains("133") == true
+                if (is133 && attempt < 3) {
+                    android.util.Log.w("BeveltryBLE", "Errore GATT 133 al tentativo $attempt/3. Attesa 2s prima del retry...")
+                    kotlinx.coroutines.delay(2000)
+                    continue
+                }
+                throw e
+            }
         }
-
-        subscribe(PuffinCharacteristic.CMD_FROM_STRAP)
-        subscribe(PuffinCharacteristic.EVENTS_FROM_STRAP)
-        subscribe(PuffinCharacteristic.DATA_FROM_STRAP)
-
-        // HELLO (0x91) conferma l'accoppiamento autenticato al firmware e spegne il LED blu
-        val helloSeq = 1
-        val helloPayload = byteArrayOf(0x23, helloSeq.toByte(), 0x91.toByte(), 0x01)
-        val frame = PuffinFrameCodec.encode(field = 0x0100, helloPayload)
-        write(frame, PuffinCharacteristic.CMD_TO_STRAP)
+        if (lastError != null) throw lastError
     }
 
     private suspend fun connectAndAwaitReady(device: BluetoothDevice, timeoutMillis: Long) {

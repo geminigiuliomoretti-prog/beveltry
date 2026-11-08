@@ -116,6 +116,11 @@ class SyncService {
     }
   }
 
+  static bool _isGatt133Error(Object error) {
+    final str = error.toString().toLowerCase();
+    return str.contains('133');
+  }
+
   /// Avvia connessione GATT, procedura di accoppiamento (bonding) ed handshake hardware.
   Future<bool> connectAndBond(
     WhoopDiscoveredDevice device, {
@@ -132,6 +137,9 @@ class SyncService {
           connectionStateNotifier.value = BleStatusBonding(device: device);
           statusMessageNotifier.value =
               'Connessione e Bonding... In attesa di autorizzazione pairing dal sistema.';
+        },
+        onRetryProgress: (message) {
+          statusMessageNotifier.value = message;
         },
       );
 
@@ -174,6 +182,18 @@ class SyncService {
             'Bonding fallito o annullato. Riprova verificando il pairing mode (LED blu).';
         return false;
       }
+
+      if (_isGatt133Error(e)) {
+        connectionStateNotifier.value = const BleStatusError(
+          'Errore GATT 133: Connessione fallita dopo 3 tentativi. '
+          'Disconnetti il dispositivo dalle impostazioni Bluetooth e riprova.',
+        );
+        statusMessageNotifier.value =
+            'Errore GATT 133: Dimentica il WHOOP nelle impostazioni Bluetooth, '
+            'riavvia il Bluetooth del telefono e rimettilo in pairing mode (LED blu fisso).';
+        return false;
+      }
+
       connectionStateNotifier.value =
           BleStatusError('Connessione o Handshake fallito: $e');
       statusMessageNotifier.value = 'Errore durante connect/handshake: $e';
