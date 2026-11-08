@@ -28,7 +28,7 @@ class DartPuffinHandshakeException implements Exception {
 class DartPuffinHandshake {
   DartPuffinHandshake(
     this.transport, {
-    this.timeout = const Duration(seconds: 4),
+    this.timeout = const Duration(seconds: 30),
   });
 
   final PuffinTransport transport;

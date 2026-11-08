@@ -30,6 +30,7 @@ abstract class WhoopBleUuids {
 /// - Scrittura con conferma (withResponse = true) sul characteristic CMD_TO_STRAP
 class BlePuffinTransport implements PuffinTransport {
   BlePuffinTransport() {
+    UniversalBle.timeout = const Duration(seconds: 30);
     _setupUniversalBleCallbacks();
   }
 
@@ -192,7 +193,7 @@ class BlePuffinTransport implements PuffinTransport {
       // 1. Connessione GATT
       await UniversalBle.connect(
         mac,
-        timeout: const Duration(seconds: 25),
+        timeout: const Duration(seconds: 30),
       );
 
       // 2. Richiesta MTU ottimale (512 byte)

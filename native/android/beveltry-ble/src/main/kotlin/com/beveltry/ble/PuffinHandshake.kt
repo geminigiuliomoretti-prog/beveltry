@@ -66,7 +66,7 @@ interface PuffinHandshakeDelegate {
 class PuffinHandshake(
     private val transport: PuffinTransport,
     private val delegate: PuffinHandshakeDelegate? = null,
-    private val timeoutMillis: Long = 3_000,
+    private val timeoutMillis: Long = 30_000,
 ) {
     @Volatile var state: HandshakeState = HandshakeState.Idle
         private set

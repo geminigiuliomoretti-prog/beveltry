@@ -110,7 +110,7 @@ class AndroidPuffinTransport(
         }
     }
 
-    fun connect(device: BluetoothDevice, timeoutMillis: Long = 10_000): Flow<AndroidBleState> = flow {
+    fun connect(device: BluetoothDevice, timeoutMillis: Long = 30_000): Flow<AndroidBleState> = flow {
         connectAndAwaitReady(device, timeoutMillis)
         emit(AndroidBleState.Ready)
     }
@@ -125,7 +125,7 @@ class AndroidPuffinTransport(
         onBondingStarted: () -> Unit = {},
         timeoutMillis: Long = 60_000,
     ) {
-        connectAndAwaitReady(device, timeoutMillis = 15_000)
+        connectAndAwaitReady(device, timeoutMillis = 30_000)
         onBondingStarted()
         val bonded = bonder.bond(device, timeoutMillis)
         if (!bonded) {

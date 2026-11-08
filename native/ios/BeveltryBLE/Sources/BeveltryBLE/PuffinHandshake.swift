@@ -82,7 +82,7 @@ public final class PuffinHandshake {
     ]
 
     /// Il trasporto deve essere già connesso e bonded prima di chiamare start().
-    public init(transport: PuffinTransport, delegate: PuffinHandshakeDelegate?, timeout: TimeInterval = 3) {
+    public init(transport: PuffinTransport, delegate: PuffinHandshakeDelegate?, timeout: TimeInterval = 30) {
         self.transport = transport
         self.delegate = delegate
         self.timeout = max(0.001, timeout)

@@ -116,7 +116,10 @@ class SyncService {
   }
 
   /// Avvia connessione GATT, procedura di accoppiamento (bonding) ed handshake hardware.
-  Future<bool> connectAndBond(WhoopDiscoveredDevice device) async {
+  Future<bool> connectAndBond(
+    WhoopDiscoveredDevice device, {
+    Duration handshakeTimeout = const Duration(seconds: 30),
+  }) async {
     connectionStateNotifier.value = BleStatusConnecting(device: device);
     statusMessageNotifier.value =
         'Connessione e Bonding... Connessione GATT a ${device.name} (${device.macAddress}).';
@@ -142,10 +145,13 @@ class SyncService {
       // Esecuzione Handshake Puffin Hardware per sbloccare la sessione del WHOOP
       if (transport is! SimulatedPuffinTransport) {
         statusMessageNotifier.value = 'Esecuzione Handshake di autenticazione con il WHOOP...';
-        final handshake = DartPuffinHandshake(transport);
+        final handshake = DartPuffinHandshake(
+          transport,
+          timeout: handshakeTimeout,
+        );
         await handshake.start(onProgress: (step) {
           statusMessageNotifier.value = step;
-        });
+        }).timeout(handshakeTimeout);
       }
 
       connectionStateNotifier.value = BleStatusConnected(device, isHardwareVerified: true);
