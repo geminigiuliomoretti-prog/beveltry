@@ -569,30 +569,18 @@ class DashboardScreenState extends State<DashboardScreen> {
                 ),
               ),
             ),
+            const SizedBox(width: 8),
+            IconButton.outlined(
+              key: const Key('bluetooth_guide_button'),
+              tooltip: 'Guida associazione e risoluzione Bluetooth',
+              icon: const Icon(Icons.help_outline),
+              onPressed: () => _showBluetoothGuideDialog(context),
+            ),
           ],
         ),
         if (status is BleStatusError) ...[
           const SizedBox(height: 8),
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: Colors.red.shade900.withValues(alpha: 0.3),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.redAccent),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.error_outline, color: Colors.redAccent, size: 20),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    status.message,
-                    style: const TextStyle(color: Colors.redAccent, fontSize: 12),
-                  ),
-                ),
-              ],
-            ),
-          ),
+          _buildBluetoothErrorCard(context, status.message),
         ],
         if (status is BleStatusDiscovered) ...[
           const SizedBox(height: 8),
@@ -642,6 +630,138 @@ class DashboardScreenState extends State<DashboardScreen> {
           ),
         ],
       ],
+    );
+  }
+
+  Widget _buildBluetoothErrorCard(BuildContext context, String errorMessage) {
+    return Card(
+      key: const Key('bluetooth_troubleshooting_guide'),
+      margin: EdgeInsets.zero,
+      color: Colors.red.shade900.withValues(alpha: 0.25),
+      shape: RoundedRectangleBorder(
+        side: BorderSide(color: Colors.redAccent.withValues(alpha: 0.8)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10.0, vertical: 8.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.error_outline, color: Colors.redAccent, size: 18),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    errorMessage,
+                    style: const TextStyle(
+                      color: Colors.redAccent,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const Divider(height: 10, thickness: 0.5, color: Colors.redAccent),
+            const Text(
+              'Risoluzione problemi Bluetooth & Associazione:',
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                fontSize: 11,
+                color: Colors.amberAccent,
+              ),
+            ),
+            const SizedBox(height: 4),
+            _buildTroubleshootStep(
+              icon: Icons.close,
+              text: 'Chiudere l\'app ufficiale WHOOP.',
+            ),
+            const SizedBox(height: 2),
+            _buildTroubleshootStep(
+              icon: Icons.bluetooth_disabled,
+              text: 'Dimenticare il WHOOP dalle impostazioni Bluetooth del telefono.',
+            ),
+            const SizedBox(height: 2),
+            _buildTroubleshootStep(
+              icon: Icons.restart_alt,
+              text: 'Riavviare il Bluetooth o il telefono.',
+            ),
+            const SizedBox(height: 2),
+            _buildTroubleshootStep(
+              icon: Icons.touch_app,
+              text: 'Rimettere il WHOOP in pairing mode (LED blu fisso).',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTroubleshootStep({required IconData icon, required String text}) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 15, color: Colors.amber.shade300),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            text,
+            style: const TextStyle(fontSize: 11),
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _showBluetoothGuideDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.bluetooth, color: Colors.tealAccent),
+            SizedBox(width: 8),
+            Text('Guida Bluetooth & Pairing', style: TextStyle(fontSize: 16)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Per evitare conflitti, errori GATT 133 o fallimento del bonding:',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 10),
+            _buildTroubleshootStep(
+              icon: Icons.close,
+              text: 'Chiudere l\'app ufficiale WHOOP.',
+            ),
+            const SizedBox(height: 6),
+            _buildTroubleshootStep(
+              icon: Icons.bluetooth_disabled,
+              text: 'Dimenticare il WHOOP dalle impostazioni Bluetooth del telefono.',
+            ),
+            const SizedBox(height: 6),
+            _buildTroubleshootStep(
+              icon: Icons.restart_alt,
+              text: 'Riavviare il Bluetooth o il telefono.',
+            ),
+            const SizedBox(height: 6),
+            _buildTroubleshootStep(
+              icon: Icons.touch_app,
+              text: 'Rimettere il WHOOP in pairing mode (LED blu fisso).',
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
     );
   }
 

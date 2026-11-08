@@ -223,9 +223,51 @@ void main() {
     await tester.tap(find.text('WBB5AP-5AG0558675'));
     await tester.pumpAndSettle();
 
-    // Verifica messaggio di errore esplicito
+    // Verifica messaggio di errore esplicito e guida alla pulizia Bluetooth
     expect(find.textContaining('Bonding fallito o annullato'), findsAtLeastNWidgets(1));
     expect(syncService.connectionState, isA<BleStatusError>());
+
+    // Verifica presenza della card con i passi di pulizia Bluetooth
+    expect(find.byKey(const Key('bluetooth_troubleshooting_guide')), findsOneWidget);
+    expect(find.text('Chiudere l\'app ufficiale WHOOP.'), findsOneWidget);
+    expect(find.text('Dimenticare il WHOOP dalle impostazioni Bluetooth del telefono.'), findsOneWidget);
+    expect(find.text('Riavviare il Bluetooth o il telefono.'), findsOneWidget);
+    expect(find.text('Rimettere il WHOOP in pairing mode (LED blu fisso).'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    await repository.close();
+  });
+
+  testWidgets('Dashboard UI: pulsante Guida Bluetooth mostra popup con istruzioni di pulizia e associazione', (tester) async {
+    final repository = WhoopRepository.inMemory();
+    final syncService = SyncService(
+      repository: repository,
+      simulateIfNoHardware: true,
+    );
+
+    await tester.pumpWidget(createTestWidget(
+      repository: repository,
+      syncService: syncService,
+    ));
+    await tester.pumpAndSettle();
+
+    final guideButton = find.byKey(const Key('bluetooth_guide_button'));
+    expect(guideButton, findsOneWidget);
+
+    await tester.tap(guideButton);
+    await tester.pumpAndSettle();
+
+    // Verifica apertura del Dialog con le 4 istruzioni
+    expect(find.text('Guida Bluetooth & Pairing'), findsOneWidget);
+    expect(find.text('Chiudere l\'app ufficiale WHOOP.'), findsOneWidget);
+    expect(find.text('Dimenticare il WHOOP dalle impostazioni Bluetooth del telefono.'), findsOneWidget);
+    expect(find.text('Riavviare il Bluetooth o il telefono.'), findsOneWidget);
+    expect(find.text('Rimettere il WHOOP in pairing mode (LED blu fisso).'), findsOneWidget);
+
+    // Chiusura del Dialog
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+    expect(find.text('Guida Bluetooth & Pairing'), findsNothing);
 
     await tester.pumpWidget(const SizedBox());
     await repository.close();
