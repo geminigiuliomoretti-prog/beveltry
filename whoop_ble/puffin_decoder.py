@@ -1,4 +1,4 @@
-"""
+﻿"""
 WHOOP Gen 5 ("Puffin" fd4b) Packet Decoder.
 Decodes:
 - Live HR 0x28 (BPM, On-Wrist validity flag, direct RR in ms, Unix timestamp)
@@ -268,7 +268,7 @@ def decode_historical_record_0x2F(inner: bytes) -> Dict[str, Any]:
         # Steps: inner offset 57..59
         steps = struct.unpack_from("<H", inner, 57)[0] if length >= 59 else 0
 
-        # Skin Temperature: inner offset 61..63 (s16 in 0.1 °C, e.g. 313 = 31.3°C)
+        # Skin Temperature: inner offset 61..63 (s16 in 0.1 Â°C, e.g. 313 = 31.3Â°C)
         skin_temp_c = None
         if length >= 63:
             raw_temp = struct.unpack_from("<h", inner, 61)[0]
@@ -367,9 +367,12 @@ def decode_cursor_metadata_0x31(inner: bytes) -> Dict[str, Any]:
         inner = inner[8 : len(inner) - 4]
 
     cursor_hex: Optional[str] = None
-    # Il cursore reale a 8 byte nel pacchetto 0x31 si trova all'offset inner[12:20]
-    if len(inner) >= 20:
-        cursor_bytes = inner[12:20]
+    # Il cursore reale a 8 byte nel pacchetto 0x31 si trova all'offset inner[13:21]
+    if len(inner) >= 21:
+        cursor_bytes = inner[13:21]
+        cursor_hex = cursor_bytes.hex().upper()
+    elif len(inner) >= 13:
+        cursor_bytes = inner[5:13]
         cursor_hex = cursor_bytes.hex().upper()
 
     return {

@@ -125,8 +125,8 @@ void main() {
       // Skin temp at inner[61..63]
       bd.setInt16(61, 312, Endian.little); // 31.2 C
 
-      // Steps at inner[73..75]
-      bd.setUint16(73, 4520, Endian.little);
+      // Steps at inner[57..59]
+      bd.setUint16(57, 4520, Endian.little);
 
       // Optical baseline at inner[98..100]
       bd.setUint16(98, 38500, Endian.little); // > 30000 = on-wrist
@@ -156,11 +156,23 @@ void main() {
       Uint8List val = Uint8List.fromList([
         0x10, // 8-bit HR, with RR intervals
         65,   // HR 65
-        0x00, 0x04, // 1024 raw -> 1000 ms
+        0xE8, 0x03, // 1000 ms direct (WHOOP 5.0 transmits direct ms without 1/1024s scaling)
       ]);
       var decoded = PuffinDecoder.decodeStandardHr0x2A37(val);
       expect(decoded['hr'], equals(65));
       expect(decoded['rr_ms'], equals([1000]));
+    });
+
+    test('Decode Cursor 0x31 from hardware frame at inner[13:21]', () {
+      Uint8List inner = Uint8List(40);
+      inner[0] = 0x31;
+      Uint8List cursorExpected = Uint8List.fromList([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+      inner.setRange(13, 21, cursorExpected);
+
+      var meta = PuffinDecoder.decodeCursor0x31(inner);
+      expect(meta, isNotNull);
+      expect(meta!.cursorHex, equals('1122334455667788'));
+      expect(meta.cursorBytes, equals(cursorExpected));
     });
   });
 }
