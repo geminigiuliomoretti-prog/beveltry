@@ -53,25 +53,37 @@ void main() {
       expect(syncService.connectionState, isA<BleStatusConnected>());
       expect(syncService.isConnected, isTrue);
 
-      // 3. Test Vibrazione (0x42)
-      final vibSuccess = await syncService.sendVibration(slot: 1, pattern: 1, durationMs: 1000);
+      // 3. Test Vibrazione Immediata (Opcode 0x13)
+      final vibSuccess = await syncService.sendVibration(pattern: 2, loops: 3);
       expect(vibSuccess, isTrue);
       expect(transport.sentFrames.length, equals(1));
 
       final frame = transport.sentFrames.first;
       expect(frame[0], equals(0xAA));
       expect(frame[1], equals(0x01));
+      expect(frame[4], equals(0x01)); // field u16 LE 1 -> 01 00 sul cavo
+      expect(frame[5], equals(0x00));
 
       final innerPayload = PuffinFrameCodec.decode(frame);
       expect(innerPayload[0], equals(0x23)); // Command prefix
       expect(innerPayload[1], equals(1));    // Sequence 1
-      expect(innerPayload[2], equals(0x42)); // Opcode SET_ALARM_TIME / ALARM_CONTROL
-      expect(innerPayload[3], equals(0x01)); // Slot 1
-      expect(innerPayload[4], equals(0x01)); // Pattern 1
-      expect(innerPayload[5], equals(0xE8)); // 1000 ms lower byte
-      expect(innerPayload[6], equals(0x03)); // 1000 ms upper byte
+      expect(innerPayload[2], equals(0x13)); // Opcode HAPTIC_TRIGGER (Bug 1 Fix)
+      expect(innerPayload[3], equals(0x02)); // Pattern 2
+      expect(innerPayload[4], equals(0x03)); // Loops 3
 
-      // 4. Disconnect
+      // 4. Test Sveglia Programmata (Opcode 0x42 verificato da HCI log)
+      final alarmSuccess = await syncService.setAlarmTime(slot: 1, targetEpochSeconds: 1715000010);
+      expect(alarmSuccess, isTrue);
+      expect(transport.sentFrames.length, equals(2));
+
+      final alarmFrame = transport.sentFrames[1];
+      final alarmInner = PuffinFrameCodec.decode(alarmFrame);
+      expect(alarmInner[0], equals(0x23));
+      expect(alarmInner[1], equals(2));
+      expect(alarmInner[2], equals(0x42)); // Opcode SET_ALARM_TIME
+      expect(alarmInner[3], equals(0x04)); // b3 revision byte da HCI log
+
+      // 5. Disconnect
       await syncService.disconnect();
       expect(syncService.connectionState, isA<BleStatusIdle>());
       expect(syncService.isConnected, isFalse);

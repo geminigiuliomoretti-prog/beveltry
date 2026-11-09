@@ -61,6 +61,19 @@ class DartPuffinHandshake {
     ('enable_sig12', 2),
   ];
 
+  int? _extractHelloTimestamp(Uint8List raw) {
+    // In rawPayload dal frame 0x91 del firmware ufficiale:
+    // raw[0] = 0x24, [1] = strap_seq, [2] = 0x91, [3] = echo_seq, [4] = status, [5] = b3
+    // raw[6..10] = f9 01 00 00 00
+    // raw[11..14] = 4 byte Unix timestamp LE
+    if (raw.length >= 15 && raw[0] == 0x24 && raw[2] == 0x91) {
+      final bd = ByteData.sublistView(raw, 11, 15);
+      final ts = bd.getUint32(0, Endian.little);
+      if (ts > 1000000000) return ts;
+    }
+    return _extractTimestamp(raw);
+  }
+
   int? _extractTimestamp(Uint8List raw) {
     final offset = raw.length >= 9 ? 5 : (raw.length >= 8 ? 4 : -1);
     if (offset >= 0 && raw.length >= offset + 4) {
@@ -71,6 +84,12 @@ class DartPuffinHandshake {
   }
 
   /// Esegue la sequenza completa di autenticazione con il cinturino.
+  ///
+  /// Sequenza verificata al 100% dalla cattura btsnoop_hci.log dell'app ufficiale:
+  /// 1. 0x91 (GET_HELLO, b3 = 0x03): spegne il LED blu di pairing, verifica clock e seriale
+  /// 2. 0x8D (GET_ADVERTISING_NAME, b3 = 0x01)
+  /// 3. Verifica Clock Latching (da 0x91 o 0x0B)
+  /// 4. 0x22 (GET_DATA_RANGE, b3 = 0x00): prepara lo streaming e l'offload
   Future<void> start({
     void Function(String step)? onProgress,
   }) async {
@@ -78,123 +97,57 @@ class DartPuffinHandshake {
       throw DartPuffinHandshakeException('Trasporto BLE non connesso');
     }
 
-    // 1. Invia 0x91 GET_HELLO (field = 1)
+    // 1. Invia 0x91 GET_HELLO (field = 1 -> wire bytes 01 00, b3 = 0x03)
     onProgress?.call('Invio HELLO (0x91)...');
     final helloSeq = _nextSeq();
-    final helloPayload = Uint8List.fromList([0x23, helloSeq, 0x91, 0x01]);
-    await _sendAndAcknowledge(
+    final helloPayload = Uint8List.fromList([0x23, helloSeq, 0x91, 0x03]);
+    final helloResp = await _sendAndAcknowledge(
       payload: helloPayload,
       opcode: 0x91,
       field: 1,
       allowedStatuses: const {0x00, 0x01, 0x02},
       retryOnce: true,
     );
-    onProgress?.call('HELLO confermato dal cinturino (LED blu spento).');
+    onProgress?.call('HELLO confermato dal cinturino (LED spento).');
 
-    // 2. Lettura del Clock del cinturino (0x0B)
-    onProgress?.call('Lettura Clock cinturino (0x0B)...');
+    // 2. Lettura Advertising Name (0x8D, b3 = 0x01)
+    onProgress?.call('Lettura Advertising Name (0x8D)...');
     try {
-      final clockSeq = _nextSeq();
-      final readClockPayload = Uint8List.fromList([0x23, clockSeq, 0x0B, 0x00]);
-      final clockResp = await _sendAndAcknowledge(
-        payload: readClockPayload,
-        opcode: 0x0B,
-        field: 1,
-        allowedStatuses: const {0x00, 0x01, 0x02},
-      );
-      final ts = _extractTimestamp(clockResp.rawPayload);
-      if (ts != null) {
-        onProgress?.call('Clock cinturino letto: $ts');
-      }
-    } catch (e) {
-      onProgress?.call('Warning lettura Clock (0x0B): $e');
-    }
-
-    // 3. Impostazione del Clock Unix corrente (0x0A)
-    onProgress?.call('Allineamento Clock Unix (0x0A)...');
-    try {
-      final setClockSeq = _nextSeq();
-      final nowSeconds = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
-      final setClockPayload = Uint8List.fromList([
-        0x23,
-        setClockSeq,
-        0x0A,
-        0x01,
-        nowSeconds & 0xFF,
-        (nowSeconds >> 8) & 0xFF,
-        (nowSeconds >> 16) & 0xFF,
-        (nowSeconds >> 24) & 0xFF,
-      ]);
+      final nameSeq = _nextSeq();
+      final namePayload = Uint8List.fromList([0x23, nameSeq, 0x8D, 0x01]);
       await _sendAndAcknowledge(
-        payload: setClockPayload,
-        opcode: 0x0A,
+        payload: namePayload,
+        opcode: 0x8D,
         field: 1,
         allowedStatuses: const {0x00, 0x01, 0x02},
       );
-      onProgress?.call('Clock Unix allineato.');
+      onProgress?.call('Advertising Name confermato.');
     } catch (e) {
-      onProgress?.call('Warning impostazione Clock (0x0A): $e (proseguo)');
+      onProgress?.call('Warning lettura Advertising Name (0x8D): $e');
     }
 
-    // 4. Scambio chiavi di sessione (0x73 KEY_EXCHANGE) con 32 byte casuali sicuri
-    onProgress?.call('Key exchange crittografico (0x73)...');
-    try {
-      final keySeq = _nextSeq();
-      final random = Random.secure();
-      final randomKey = Uint8List(32);
-      for (var i = 0; i < 32; i++) {
-        randomKey[i] = random.nextInt(256);
-      }
-      final keyPayload = Uint8List.fromList([
-        0x23,
-        keySeq,
-        0x73,
-        0x01,
-        0x01,
-        ...randomKey,
-      ]);
-      await _sendAndAcknowledge(
-        payload: keyPayload,
-        opcode: 0x73,
-        field: 1,
-        allowedStatuses: const {0x00, 0x01, 0x02},
-      );
-      onProgress?.call('Key exchange completato.');
-    } catch (e) {
-      onProgress?.call('Warning Key Exchange (0x73): $e (proseguo)');
-    }
-
-    // 5. Configurazione delle 16 Feature Flags (0x78)
-    for (var i = 0; i < defaultFeatureFlags.length; i++) {
-      final (name, value) = defaultFeatureFlags[i];
+    // 3. Verifica Clock Latching (estratto direttamente da HELLO o da 0x0B)
+    final helloTs = _extractHelloTimestamp(helloResp.rawPayload);
+    if (helloTs != null) {
+      onProgress?.call('Clock cinturino verificato da HELLO: $helloTs');
+    } else {
       try {
-        final flagSeq = _nextSeq();
-        final nameBytes = ascii.encode(name);
-        final paddedName = Uint8List(32);
-        paddedName.setRange(0, min(32, nameBytes.length), nameBytes);
-
-        final flagPayload = Uint8List.fromList([
-          0x23,
-          flagSeq,
-          0x78,
-          0x01,
-          ...paddedName,
-          value & 0xFF,
-        ]);
-
-        await _sendAndAcknowledge(
-          payload: flagPayload,
-          opcode: 0x78,
+        final clockSeq = _nextSeq();
+        final readClockPayload = Uint8List.fromList([0x23, clockSeq, 0x0B, 0x00]);
+        final clockResp = await _sendAndAcknowledge(
+          payload: readClockPayload,
+          opcode: 0x0B,
           field: 1,
           allowedStatuses: const {0x00, 0x01, 0x02},
-          retryOnce: true,
         );
-      } catch (e) {
-        onProgress?.call('Warning flag $name (0x78): $e (proseguo)');
-      }
+        final initialTs = _extractTimestamp(clockResp.rawPayload);
+        if (initialTs != null) {
+          onProgress?.call('Clock cinturino letto (0x0B): $initialTs');
+        }
+      } catch (_) {}
     }
 
-    // 6. Query Range (0x22)
+    // 4. Query Range Dati Storici (0x22, b3 = 0x00)
     onProgress?.call('Interrogazione range dati storici (0x22)...');
     try {
       final rangeSeq = _nextSeq();
@@ -205,8 +158,9 @@ class DartPuffinHandshake {
         field: 1,
         allowedStatuses: const {0x00, 0x01, 0x02},
       );
+      onProgress?.call('Range dati confermato.');
     } catch (_) {
-      // Alcuni firmware considerano 0x22 come sola notifica o query informativa
+      // Alcuni firmware considerano 0x22 come sola notifica informativa
     }
 
     onProgress?.call('Handshake hardware completato con successo!');
@@ -220,6 +174,7 @@ class DartPuffinHandshake {
     bool retryOnce = false,
   }) async {
     final frame = PuffinFrameCodec.encode(field, payload);
+    final expectedSeq = payload.length >= 2 ? payload[1] : null;
 
     for (var attempt = 0; attempt <= (retryOnce ? 1 : 0); attempt++) {
       final completer = Completer<PuffinFrame>();
@@ -232,7 +187,10 @@ class DartPuffinHandshake {
         // Risposta 0x24: [0x24, echo_seq, resp_cmd, strap_seq, resp_status, ...payload]
         // Se raw.length >= 5: byte[3] = strap_seq, byte[4] = resp_status.
         // Se raw.length == 4 (legacy): byte[3] = resp_status.
-        if (raw.length >= 4 && raw[0] == 0x24 && raw[2] == opcode) {
+        if (raw.length >= 4 &&
+            raw[0] == 0x24 &&
+            (expectedSeq == null || raw[1] == expectedSeq) &&
+            raw[2] == opcode) {
           final status = raw.length >= 5 ? raw[4] : raw[3];
           if (allowedStatuses.contains(status)) {
             if (!completer.isCompleted) completer.complete(event.frame);
@@ -240,7 +198,7 @@ class DartPuffinHandshake {
             if (!completer.isCompleted) {
               completer.completeError(
                 DartPuffinHandshakeException(
-                  'Comando rifiutato dal cinturino',
+                  'Comando 0x${opcode.toRadixString(16)} rifiutato dal cinturino con status 0x${status.toRadixString(16)}',
                   opcode: opcode,
                   status: status,
                 ),
@@ -256,8 +214,9 @@ class DartPuffinHandshake {
           characteristic: PuffinCharacteristic.cmdToStrap,
         );
 
+        final stepTimeout = timeout.inSeconds > 5 ? const Duration(seconds: 4) : timeout;
         final response = await completer.future.timeout(
-          timeout,
+          stepTimeout,
           onTimeout: () => throw DartPuffinHandshakeException(
             'Timeout attesa risposta 0x24 per opcode 0x${opcode.toRadixString(16)}',
             opcode: opcode,

@@ -14,7 +14,7 @@ abstract class WhoopBleUuids {
   static const String cmdFromStrap = 'fd4b0003-cce1-4033-93ce-002d5875f58a';
   static const String eventsFromStrap = 'fd4b0004-cce1-4033-93ce-002d5875f58a';
   static const String dataFromStrap = 'fd4b0005-cce1-4033-93ce-002d5875f58a';
-  static const String memfault = 'fd4b0006-cce1-4033-93ce-002d5875f58a';
+  static const String memfault = 'fd4b0007-cce1-4033-93ce-002d5875f58a';
   static const String heartRateService = '0000180d-0000-1000-8000-00805f9b34fb';
   static const String heartRateMeasurement = '00002a37-0000-1000-8000-00805f9b34fb';
 }
@@ -55,10 +55,22 @@ class BlePuffinTransport implements PuffinTransport {
 
   final StreamController<PuffinIncomingFrame> _incomingFramesController =
       StreamController<PuffinIncomingFrame>.broadcast();
+  final StreamController<Uint8List> _standardHrController =
+      StreamController<Uint8List>.broadcast();
+  final StreamController<bool> _connectionChangeController =
+      StreamController<bool>.broadcast();
+
+  Future<void> _writeQueue = Future.value();
 
   @override
   Stream<PuffinIncomingFrame> get incomingFrames =>
       _incomingFramesController.stream;
+
+  @override
+  Stream<Uint8List> get standardHrStream => _standardHrController.stream;
+
+  @override
+  Stream<bool> get onConnectionChanged => _connectionChangeController.stream;
 
   @override
   bool get isConnected => _isConnected;
@@ -72,6 +84,13 @@ class BlePuffinTransport implements PuffinTransport {
       if (event.deviceId.toLowerCase() != current.macAddress.toLowerCase()) return;
 
       final normChar = event.characteristicId.toLowerCase();
+
+      // Instradamento canale standard Bluetooth SIG 0x2A37
+      if (normChar.contains('2a37')) {
+        _standardHrController.add(event.value);
+        return;
+      }
+
       final charType = _mapUuidToCharacteristic(normChar);
       if (charType == null) return;
 
@@ -91,6 +110,7 @@ class BlePuffinTransport implements PuffinTransport {
       if (current != null &&
           change.deviceId.toLowerCase() == current.macAddress.toLowerCase()) {
         _isConnected = change.isConnected;
+        _connectionChangeController.add(change.isConnected);
         if (!change.isConnected) {
           _connectedDevice = null;
           _resetReassemblers();
@@ -109,7 +129,7 @@ class BlePuffinTransport implements PuffinTransport {
     if (charUuid.contains('fd4b0003')) return PuffinCharacteristic.cmdFromStrap;
     if (charUuid.contains('fd4b0004')) return PuffinCharacteristic.eventsFromStrap;
     if (charUuid.contains('fd4b0005')) return PuffinCharacteristic.dataFromStrap;
-    if (charUuid.contains('fd4b0006')) return PuffinCharacteristic.memfault;
+    if (charUuid.contains('fd4b0007')) return PuffinCharacteristic.memfault;
     return null;
   }
 
@@ -139,13 +159,66 @@ class BlePuffinTransport implements PuffinTransport {
         await UniversalBle.requestPermissions();
       }
 
+      // 1. Controllo Dispositivi di Sistema (Già Associati/Bonded) PRIMA dello Scan
+      try {
+        List<BleDevice> systemDevices = [];
+        try {
+          systemDevices = await UniversalBle.getSystemDevices(
+            withServices: [WhoopBleUuids.puffinService],
+          );
+        } catch (_) {}
+        if (systemDevices.isEmpty) {
+          try {
+            systemDevices = await UniversalBle.getSystemDevices();
+          } catch (_) {}
+        }
+
+        for (final device in systemDevices) {
+          final id = device.deviceId;
+          final name = device.name ?? '';
+          final upperName = name.toUpperCase();
+          final upperId = id.toUpperCase();
+
+          // Ignora esplicitamente il WHOOP A
+          if (upperName.contains('5A00479315')) continue;
+
+          final services = device.services.map((s) => s.toLowerCase()).toList();
+          final matchesService = services.any((s) => s.contains('fd4b'));
+          final matchesName = upperName.startsWith('WBB5AP') ||
+              upperName.startsWith('5AG') ||
+              upperName.contains('WHOOP');
+          final matchesKnownMac =
+              upperId == 'FD:49:44:66:1D:92' || upperId.contains('FD:49:44');
+
+          if (matchesService || matchesName || matchesKnownMac) {
+            final displayName = name.isNotEmpty
+                ? name
+                : (matchesKnownMac ? 'WHOOP 5.0 (FD:49:44:66:1D:92)' : 'WHOOP ($id)');
+
+            discoveredMap[id] = WhoopDiscoveredDevice(
+              name: displayName,
+              macAddress: id,
+              rssi: device.rssi ?? -50,
+            );
+          }
+        }
+
+        if (discoveredMap.isNotEmpty) {
+          controller.add(discoveredMap.values.toList());
+        }
+      } catch (_) {}
+
+      // 2. Scan Reale con Popolamento Cache di universal_ble
       scanSubscription = UniversalBle.scanStream.listen((device) {
         final id = device.deviceId;
         final name = device.name ?? '';
         final upperName = name.toUpperCase();
         final upperId = id.toUpperCase();
-        final services = device.services.map((s) => s.toLowerCase()).toList();
 
+        // Ignora esplicitamente il WHOOP A
+        if (upperName.contains('5A00479315')) return;
+
+        final services = device.services.map((s) => s.toLowerCase()).toList();
         final matchesService = services.any((s) => s.contains('fd4b'));
         final matchesName = upperName.startsWith('WBB5AP') ||
             upperName.startsWith('5AG') ||
@@ -202,15 +275,37 @@ class BlePuffinTransport implements PuffinTransport {
 
     for (var attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        // 1. Fermare la scansione prima di connettersi
+        // 1. Fermare la scansione prima di connettersi e attendere 300ms
         try {
           await UniversalBle.stopScan();
+        } catch (_) {}
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+
+        // Popola la cache nativa di universal_ble se il dispositivo era bonded di sistema
+        try {
+          await UniversalBle.getSystemDevices();
         } catch (_) {}
 
         _resetReassemblers();
         _connectedDevice = device;
 
-        // 2. Connessione GATT con trasporto LE (30s)
+        // 2. Controllo se già associato (isPaired): se true, salta pair()
+        bool isAlreadyBonded = false;
+        try {
+          isAlreadyBonded = (await UniversalBle.isPaired(mac)) == true;
+        } catch (_) {}
+
+        if (!isAlreadyBonded) {
+          onBondingStarted?.call();
+          try {
+            await UniversalBle.pair(mac, timeout: const Duration(seconds: 35));
+          } catch (pairErr) {
+            // Non bloccare la connessione se pair() fallisce: registra e prosegui con connect e discoverServices
+            onRetryProgress?.call('Avviso pairing: $pairErr. Proseguimento con connessione...');
+          }
+        }
+
+        // 3. Connessione GATT con trasporto LE (30s)
         await UniversalBle.connect(
           mac,
           timeout: const Duration(seconds: 30),
@@ -223,35 +318,10 @@ class BlePuffinTransport implements PuffinTransport {
           // MTU non negoziabile su tutti i controller, prosegue
         }
 
-        // 3. Avviare il bonding e attendere il completamento (BOND_BONDED)
-        bool isAlreadyBonded = false;
-        try {
-          isAlreadyBonded = (await UniversalBle.isPaired(mac)) == true;
-        } catch (_) {
-          // Ignora eccezioni non bloccanti
-        }
-
-        if (!isAlreadyBonded) {
-          onBondingStarted?.call();
-          try {
-            await UniversalBle.pair(mac, timeout: const Duration(seconds: 35));
-          } catch (pairErr) {
-            throw BleBondException('Bonding fallito o annullato: $pairErr');
-          }
-
-          // 4. Verificare che lo stato finale sia BOND_BONDED
-          if (BleCapabilities.hasSystemPairingApi) {
-            final isBondedNow = await UniversalBle.isPaired(mac);
-            if (isBondedNow != true) {
-              throw BleBondException('Bonding non completato (stato non BOND_BONDED)');
-            }
-          }
-        }
-
-        // 5. Scoperta Servizi GATT (solo dopo bonding completato)
+        // 4. Scoperta Servizi GATT
         await UniversalBle.discoverServices(mac);
 
-        // Sottoscrizione notifiche caratteristiche WHOOP 5.0
+        // 5. Sottoscrizione notifiche caratteristiche WHOOP 5.0
         await UniversalBle.subscribeNotifications(
           mac,
           WhoopBleUuids.puffinService,
@@ -267,6 +337,13 @@ class BlePuffinTransport implements PuffinTransport {
           WhoopBleUuids.puffinService,
           WhoopBleUuids.dataFromStrap,
         );
+        try {
+          await UniversalBle.subscribeNotifications(
+            mac,
+            WhoopBleUuids.puffinService,
+            WhoopBleUuids.memfault,
+          );
+        } catch (_) {}
 
         try {
           await UniversalBle.subscribeNotifications(
@@ -289,11 +366,6 @@ class BlePuffinTransport implements PuffinTransport {
           await UniversalBle.disconnect(mac);
         } catch (_) {}
 
-        // Se errore di bonding esplicito, interrompi subito senza retry generico
-        if (e is BleBondException) {
-          rethrow;
-        }
-
         // Se errore 133 e rimangono tentativi, chiude GATT, attende 2 secondi e riprova
         final is133 = _isGatt133Error(e);
         if (is133 && attempt < maxRetries) {
@@ -305,7 +377,10 @@ class BlePuffinTransport implements PuffinTransport {
           continue;
         }
 
-        rethrow;
+        if (attempt == maxRetries) {
+          rethrow;
+        }
+        await Future<void>.delayed(retryDelay);
       }
     }
 
@@ -317,19 +392,28 @@ class BlePuffinTransport implements PuffinTransport {
     Uint8List frame, {
     PuffinCharacteristic characteristic = PuffinCharacteristic.cmdToStrap,
   }) async {
-    final dev = _connectedDevice;
-    if (dev == null || !_isConnected) {
-      throw StateError('Dispositivo WHOOP non connesso');
-    }
+    final completer = Completer<void>();
+    _writeQueue = _writeQueue.then((_) async {
+      try {
+        final dev = _connectedDevice;
+        if (dev == null || !_isConnected) {
+          throw StateError('Dispositivo WHOOP non connesso');
+        }
 
-    final charUuid = _mapCharacteristicToUuid(characteristic);
-    await UniversalBle.write(
-      dev.macAddress,
-      WhoopBleUuids.puffinService,
-      charUuid,
-      frame,
-      withoutResponse: false, // withResponse = true obbligatorio
-    );
+        final charUuid = _mapCharacteristicToUuid(characteristic);
+        await UniversalBle.write(
+          dev.macAddress,
+          WhoopBleUuids.puffinService,
+          charUuid,
+          frame,
+          withoutResponse: false, // withResponse = true obbligatorio
+        );
+        completer.complete();
+      } catch (e, st) {
+        completer.completeError(e, st);
+      }
+    });
+    return completer.future;
   }
 
   @override

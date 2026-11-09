@@ -257,12 +257,12 @@ void main() {
     await tester.tap(guideButton);
     await tester.pumpAndSettle();
 
-    // Verifica apertura del Dialog con le 4 istruzioni
+    // Verifica apertura del Dialog con le istruzioni
     expect(find.text('Guida Bluetooth & Pairing'), findsOneWidget);
-    expect(find.text('Chiudere l\'app ufficiale WHOOP.'), findsOneWidget);
-    expect(find.text('Dimenticare il WHOOP dalle impostazioni Bluetooth del telefono.'), findsOneWidget);
-    expect(find.text('Riavviare il Bluetooth o il telefono.'), findsOneWidget);
-    expect(find.text('Rimettere il WHOOP in pairing mode (LED blu fisso).'), findsOneWidget);
+    expect(find.textContaining('Disaccoppiare il WHOOP dall\'app ufficiale'), findsOneWidget);
+    expect(find.textContaining('Dimenticare il WHOOP dalle impostazioni Bluetooth'), findsOneWidget);
+    expect(find.textContaining('Togliere il WHOOP dal polso'), findsOneWidget);
+    expect(find.textContaining('Picchiettare 5-8 volte sul dorso'), findsOneWidget);
 
     // Chiusura del Dialog
     await tester.tap(find.text('OK'));

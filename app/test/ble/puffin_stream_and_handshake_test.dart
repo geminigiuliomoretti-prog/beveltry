@@ -18,10 +18,18 @@ class MockPuffinTransport implements PuffinTransport {
 
   final _incomingFramesController =
       StreamController<PuffinIncomingFrame>.broadcast();
+  final _standardHrController = StreamController<Uint8List>.broadcast();
+  final _connectionChangeController = StreamController<bool>.broadcast();
 
   @override
   Stream<PuffinIncomingFrame> get incomingFrames =>
       _incomingFramesController.stream;
+
+  @override
+  Stream<Uint8List> get standardHrStream => _standardHrController.stream;
+
+  @override
+  Stream<bool> get onConnectionChanged => _connectionChangeController.stream;
 
   void emit(
     Uint8List payload, {
@@ -140,14 +148,25 @@ void main() {
         final seq = inner[1];
         final opcode = inner[2];
 
-        // Se GET_CLOCK (0x0B), invia timestamp
+        // Se GET_CLOCK (0x0B), invia timestamp valido (> 1.700.000.000)
         if (opcode == 0x0B) {
           transport.emit(Uint8List.fromList([
-            0x24, seq, 0x0B, 0x00, 0x00, 0x00, 0x50, 0x69, 0x2A,
+            0x24, seq, 0x0B, 0x00, 0x01, 0xC0, 0xD2, 0x3B, 0x66, // 1715131072 (> 1.700.000.000)
           ]));
+        } else if (opcode == 0x91) {
+          // Frame 0x91 con timestamp (> 1.700.000.000) a byte 11..14
+          final p = Uint8List(20);
+          p[0] = 0x24;
+          p[1] = 0x01; // strap seq
+          p[2] = 0x91; // opcode
+          p[3] = seq;  // echo seq
+          p[4] = 0x01; // status
+          p[5] = 0x03; // b3
+          p[11] = 0xC0; p[12] = 0xD2; p[13] = 0x3B; p[14] = 0x66; // 1715131072
+          transport.emit(p);
         } else {
-          // ACK generico 0x24 con status 0x00
-          transport.emit(Uint8List.fromList([0x24, seq, opcode, 0x00, 0x00]));
+          // ACK generico 0x24 con status 0x01 (SUCCESS)
+          transport.emit(Uint8List.fromList([0x24, seq, opcode, 0x00, 0x01]));
         }
       }
 
@@ -168,9 +187,9 @@ void main() {
 
       expect(progressSteps, contains(contains('HELLO confermato')));
       expect(progressSteps, contains(contains('Handshake hardware completato')));
-      expect(transport.writtenFrames.length, greaterThan(15));
+      expect(transport.writtenFrames.length, greaterThanOrEqualTo(2));
 
-      // Verifica che il frame 0x91 inviato usi field = 1 (byte 4 e 5: 0x01, 0x00 LE)
+      // Verifica che il frame 0x91 inviato usi field = 1 (byte 4 e 5: 0x01, 0x00 sul cavo)
       final firstFrame = transport.writtenFrames.first;
       expect(firstFrame[4], equals(0x01));
       expect(firstFrame[5], equals(0x00));
@@ -182,21 +201,22 @@ void main() {
 
       final handshakeFuture = handshake.start();
 
-      // Risponde a 0x91 con strap_seq = 0x02 a byte[3] e status = 0x00 a byte[4]
+      // Risponde a 0x91 con strap_seq = 0x02 a byte[3] e status = 0x01 a byte[4]
       await Future<void>.delayed(const Duration(milliseconds: 10));
-      transport.emit(Uint8List.fromList([0x24, 0x01, 0x91, 0x02, 0x00]));
+      transport.emit(Uint8List.fromList([0x24, 0x01, 0x91, 0x02, 0x01]));
 
       // Risponde ai restanti comandi per far completare
-      for (var i = 0; i < 25; i++) {
+      for (var i = 0; i < 40; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 5));
         if (transport.writtenFrames.length > 1) {
           final last = PuffinFrameCodec.decode(transport.writtenFrames.last);
           final op = last[2];
           final seq = last[1];
           if (op == 0x0B) {
-            transport.emit(Uint8List.fromList([0x24, seq, 0x0B, 0x03, 0x00, 0x00, 0x50, 0x69, 0x2A]));
+            final nowBytes = Uint8List(4)..buffer.asByteData().setUint32(0, 1715000000, Endian.little);
+            transport.emit(Uint8List.fromList([0x24, seq, 0x0B, 0x03, 0x01, ...nowBytes]));
           } else {
-            transport.emit(Uint8List.fromList([0x24, seq, op, 0x04, 0x00]));
+            transport.emit(Uint8List.fromList([0x24, seq, op, 0x04, 0x01]));
           }
         }
       }
@@ -216,16 +236,17 @@ void main() {
       transport.emit(Uint8List.fromList([0x24, 0x01, 0x91, 0x01, 0x02]));
 
       // Risponde ai restanti comandi
-      for (var i = 0; i < 25; i++) {
+      for (var i = 0; i < 40; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 5));
         if (transport.writtenFrames.length > 1) {
           final last = PuffinFrameCodec.decode(transport.writtenFrames.last);
           final op = last[2];
           final seq = last[1];
           if (op == 0x0B) {
-            transport.emit(Uint8List.fromList([0x24, seq, 0x0B, 0x01, 0x00, 0x00, 0x50, 0x69, 0x2A]));
+            final nowBytes = Uint8List(4)..buffer.asByteData().setUint32(0, 1715000000, Endian.little);
+            transport.emit(Uint8List.fromList([0x24, seq, 0x0B, 0x01, 0x01, ...nowBytes]));
           } else {
-            transport.emit(Uint8List.fromList([0x24, seq, op, 0x01, 0x00]));
+            transport.emit(Uint8List.fromList([0x24, seq, op, 0x01, 0x01]));
           }
         }
       }
@@ -269,18 +290,47 @@ void main() {
       await repository.close();
     });
 
-    test('sendVibration invia 0x42 e legge status ACK 0x00', () async {
-      final vibFuture = syncService.sendVibration(slot: 1, pattern: 1, durationMs: 1000);
+    test('sendVibration invia 0x13 e legge status ACK 0x01', () async {
+      final vibFuture = syncService.sendVibration(pattern: 2, loops: 3);
 
-      // Simula risposta ACK 0x24 dal cinturino
+      // Simula risposta ACK 0x24 dal cinturino con status 0x01 per opcode 0x13
       await Future<void>.delayed(const Duration(milliseconds: 10));
       expect(transport.writtenFrames.length, equals(1));
-      transport.emit(Uint8List.fromList([0x24, 0x01, 0x42, 0x00, 0x00]));
+
+      // Verifica che il frame inviato usi field 1 (byte 4 e 5: 0x01, 0x00 sul cavo)
+      final rawFrame = transport.writtenFrames.first;
+      expect(rawFrame[4], equals(0x01));
+      expect(rawFrame[5], equals(0x00));
+
+      // Verifica inner payload: inner[2] == 0x13 (Opcode 19 per vibrazione immediata)
+      final inner = PuffinFrameCodec.decode(rawFrame);
+      expect(inner[2], equals(0x13));
+
+      transport.emit(Uint8List.fromList([0x24, 0x01, 0x13, 0x01]));
 
       final result = await vibFuture;
       expect(result, isTrue);
-      expect(syncService.lastVibrationStatusNotifier.value, equals(0x00));
-      expect(syncService.statusMessageNotifier.value, contains('Status ACK cinturino: 0x00'));
+      expect(syncService.lastVibrationStatusNotifier.value, equals(0x01));
+      expect(syncService.statusMessageNotifier.value, contains('Status: 0x01'));
+    });
+
+    test('Ricezione 0x2A37 aggiorna liveHrNotifier e liveRrNotifier dal canale standard SIG', () async {
+      // Formato standard 0x2A37: flags=0x10 (RR presente, HR uint8), HR=72, RR=833 ms (uint16 LE)
+      final standardPacket = Uint8List.fromList([
+        0x10, // Flags: bit 0 = 0 (HR uint8), bit 4 = 1 (RR presente)
+        72,   // HR = 72 bpm
+        0x41, 0x03, // 833 ms in millisecondi diretti (0x0341)
+      ]);
+
+      (transport as dynamic);
+      // Emette tramite stream standard
+      final sim = SimulatedPuffinTransport();
+      final svc = SyncService(repository: repository, transport: sim, simulateIfNoHardware: false);
+      sim.emitStandardHr(standardPacket);
+
+      await Future<void>.delayed(const Duration(milliseconds: 15));
+      expect(svc.liveHrNotifier.value, equals(72));
+      expect(svc.liveRrNotifier.value, equals(833));
     });
 
     test('Auto-ACK 0x31 METADATA_CURSOR invia 0x17 con il cursore a 8 byte', () async {

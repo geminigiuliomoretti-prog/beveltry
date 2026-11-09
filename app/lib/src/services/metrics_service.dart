@@ -43,19 +43,22 @@ class MetricsService {
   final String strapSerial;
   final RrArtifactFilter artifactFilter;
 
-  /// Calcola RHR ed HRV RMSSD per l'ultimo periodo notturno (ultime 24 ore).
+  /// Calcola RHR ed HRV RMSSD per l'ultimo periodo notturno / sessione di dati disponibile.
+  ///
+  /// Risolve il problema del "database vuoto": anziché filtrare rigidamente per
+  /// [DateTime.now - 24h], recupera gli ultimi [recordLimit] record disponibili
+  /// (default 5000), permettendo di analizzare dati offloadati anche con orologi non allineati.
   ///
   /// Filtra per `sleep_state == 2` (deep sleep) quando disponibile,
   /// rimuove artefatti dagli intervalli R-R e applica gli algoritmi DSP.
   Future<DailyMetrics> calculateMetricsForLastNight({
     DateTime? referenceTime,
+    int recordLimit = 5000,
   }) async {
     final now = referenceTime ?? DateTime.now().toUtc();
-    final start = now.subtract(const Duration(hours: 24));
 
-    final records = await repository.getRecordsInRange(
-      start,
-      now,
+    final records = await repository.getLatestRecords(
+      limit: recordLimit,
       strapSerial: strapSerial,
     );
 

@@ -29,6 +29,12 @@ abstract class PuffinTransport {
   /// Stream di tutti i frame Puffin decodificati con la caratteristica sorgente.
   Stream<PuffinIncomingFrame> get incomingFrames;
 
+  /// Stream di pacchetti grezzi dalla caratteristica Heart Rate standard (0x2A37).
+  Stream<Uint8List> get standardHrStream => const Stream.empty();
+
+  /// Stream degli eventi di cambio connessione di basso livello (connesso / disconnesso).
+  Stream<bool> get onConnectionChanged => const Stream.empty();
+
   /// Invia un frame binario envelope al cinturino.
   Future<void> write(
     Uint8List frame, {
@@ -75,10 +81,27 @@ class SimulatedPuffinTransport implements PuffinTransport {
 
   final _incomingFramesController =
       StreamController<PuffinIncomingFrame>.broadcast();
+  final _standardHrController = StreamController<Uint8List>.broadcast();
+  final _connectionChangeController = StreamController<bool>.broadcast();
 
   @override
   Stream<PuffinIncomingFrame> get incomingFrames =>
       _incomingFramesController.stream;
+
+  @override
+  Stream<Uint8List> get standardHrStream => _standardHrController.stream;
+
+  @override
+  Stream<bool> get onConnectionChanged => _connectionChangeController.stream;
+
+  /// Emette un pacchetto grezzo sullo stream standard Heart Rate (0x2A37).
+  void emitStandardHr(Uint8List value) => _standardHrController.add(value);
+
+  /// Emette una notifica sullo stato di connessione.
+  void emitConnectionChange(bool connected) {
+    isConnected = connected;
+    _connectionChangeController.add(connected);
+  }
 
   /// Emette un frame simulato nello stream in ingresso.
   void emitFrame(

@@ -6,6 +6,7 @@ import 'package:universal_ble/universal_ble.dart';
 import '../ble/ble.dart';
 import '../records/live28_record.dart';
 import '../records/record_decoder.dart';
+import '../records/standard_hr_record.dart';
 import '../records/v18_record.dart';
 import '../repository/whoop_repository.dart';
 
@@ -42,6 +43,30 @@ class SyncService {
     if (initialConnectionState != null) {
       connectionStateNotifier.value = initialConnectionState;
     }
+
+    _initTransportListeners();
+  }
+
+  void _initTransportListeners() {
+    transport.standardHrStream.listen((bytes) {
+      try {
+        final record = StandardHrRecord.decode(bytes);
+        liveHrNotifier.value = record.hr;
+        if (record.rrIntervalsMs.isNotEmpty) {
+          liveRrNotifier.value = record.rrIntervalsMs.last;
+        }
+      } catch (_) {}
+    });
+
+    transport.onConnectionChanged.listen((connected) {
+      if (!connected && connectionStateNotifier.value.isConnected) {
+        connectionStateNotifier.value = const BleStatusIdle();
+        statusNotifier.value = SyncStatus.idle;
+        statusMessageNotifier.value = 'Dispositivo WHOOP disconnesso.';
+        liveHrNotifier.value = null;
+        liveRrNotifier.value = null;
+      }
+    });
   }
 
   final WhoopRepository repository;
@@ -97,6 +122,9 @@ class SyncService {
         final filtered = devices.where((d) {
           final n = d.name.toUpperCase();
           final m = d.macAddress.toUpperCase();
+          // Ignora esplicitamente il WHOOP A
+          if (n.contains('5A00479315')) return false;
+
           return n.startsWith('WBB5AP') ||
               n.startsWith('5AG') ||
               n.contains('WHOOP') ||
@@ -214,16 +242,21 @@ class SyncService {
     }
   }
 
-  /// Invia il comando 0x42 (ALARM_CONTROL / Haptics) per far vibrare il cinturino.
+  /// Invia il comando 0x13 (HAPTIC_TRIGGER / Test Vibrazione Immediata) per far vibrare subito il cinturino.
+  ///
+  /// Su WHOOP 5.0 / MG l'opcode per la vibrazione immediata è 0x13 (19) (NOOP 1.34 / OpenStrap).
+  /// L'opcode 0x42 serve invece per la sveglia programmata.
   ///
   /// Parametri:
-  /// - [slot]: indice slot sveglia (default 1)
-  /// - [pattern]: pattern di vibrazione (default 1)
-  /// - [durationMs]: durata in millisecondi (default 1000 ms = 0x03E8 LE)
+  /// - [pattern]: pattern vibrazione (default 0x02)
+  /// - [loops]: cicli di ripetizione (default 0x03)
   Future<bool> sendVibration({
-    int slot = 1,
-    int pattern = 1,
-    int durationMs = 1000,
+    int pattern = 0x02,
+    int loops = 0x03,
+    int? slot,
+    int? targetEpochSeconds,
+    int? delaySeconds,
+    int? durationMs,
   }) async {
     if (!transport.isConnected) {
       statusMessageNotifier.value =
@@ -232,26 +265,28 @@ class SyncService {
     }
 
     final seq = _nextSeq();
+    // Inner payload per Test Vibrazione 0x13: [0x23, seq, 0x13, pattern, loops, 0x00, 0x00, 0x00]
     final innerCmd = Uint8List.fromList([
       0x23,
       seq,
-      0x42, // Opcode ALARM_CONTROL / Haptics
-      slot & 0xFF,
+      0x13, // Opcode HAPTIC_TRIGGER
       pattern & 0xFF,
-      durationMs & 0xFF,
-      (durationMs >> 8) & 0xFF,
+      loops & 0xFF,
+      0x00,
+      0x00,
+      0x00,
     ]);
 
-    final frame = PuffinFrameCodec.encode(1, innerCmd);
+    final frame = PuffinFrameCodec.encode(PuffinFrameCodec.commandField, innerCmd);
 
     if (transport is SimulatedPuffinTransport) {
       await transport.write(
         frame,
         characteristic: PuffinCharacteristic.cmdToStrap,
       );
-      lastVibrationStatusNotifier.value = 0x00;
+      lastVibrationStatusNotifier.value = 0x01;
       statusMessageNotifier.value =
-          'Comando vibrazione 0x42 inviato con successo (slot $slot).';
+          'Comando vibrazione immediata 0x13 inviato con successo (pattern $pattern, loops $loops).';
       return true;
     }
 
@@ -261,7 +296,104 @@ class SyncService {
             event.characteristic == PuffinCharacteristic.cmdFromStrap)
         .listen((event) {
       final raw = event.frame.rawPayload;
-      if (raw.length >= 4 && raw[0] == 0x24 && raw[2] == 0x42) {
+      if (raw.length >= 3 && raw[0] == 0x24 && raw[2] == 0x13) {
+        // Se seq corrisponde o risponde status
+        final status = raw.length >= 4 ? raw[3] : 0x01;
+        if (!completer.isCompleted) completer.complete(status);
+      }
+    });
+
+    try {
+      await transport.write(
+        frame,
+        characteristic: PuffinCharacteristic.cmdToStrap,
+      );
+
+      final status = await completer.future.timeout(
+        const Duration(seconds: 4),
+        onTimeout: () => 0x01, // Molti firmware eseguono il feedback aptico senza inviare 0x24 esplicito
+      );
+
+      lastVibrationStatusNotifier.value = status >= 0 ? status : null;
+
+      final statusHex = '0x${status.toRadixString(16).padLeft(2, '0').toUpperCase()}';
+      final ok = status == 0x01 || status == 0x00 || status == 0x02;
+      statusMessageNotifier.value = ok
+          ? 'Vibrazione immediata 0x13 inviata al cinturino! Status: $statusHex'
+          : 'Comando vibrazione respinto dal cinturino con status $statusHex';
+      return ok;
+    } finally {
+      await subscription.cancel();
+    }
+  }
+
+  /// Invia il comando 0x42 (SET_ALARM_TIME) per programmare la sveglia / vibrazione futura.
+  ///
+  /// Verificato al 100% dalla cattura btsnoop_hci.log:
+  /// - Opcode: 0x42, b3: 0x04
+  /// - Payload: [slot (1), target_epoch_u32 LE, 00 00, 2f 98, 00..00 (8B), 07 1e 00]
+  Future<bool> setAlarmTime({
+    int slot = 1,
+    int? targetEpochSeconds,
+    int delaySeconds = 5,
+  }) async {
+    if (!transport.isConnected) {
+      statusMessageNotifier.value =
+          'Impossibile programmare sveglia: cinturino non connesso.';
+      return false;
+    }
+
+    final seq = _nextSeq();
+    final nowSec = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+    final targetSec = targetEpochSeconds ?? (nowSec + delaySeconds);
+
+    final innerCmd = Uint8List.fromList([
+      0x23,
+      seq,
+      0x42, // Opcode SET_ALARM_TIME
+      0x04, // b3 revision verified from HCI log
+      slot & 0xFF,
+      targetSec & 0xFF,
+      (targetSec >> 8) & 0xFF,
+      (targetSec >> 16) & 0xFF,
+      (targetSec >> 24) & 0xFF,
+      0x00,
+      0x00,
+      0x2F,
+      0x98,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x07,
+      0x1E,
+      0x00,
+    ]);
+
+    final frame = PuffinFrameCodec.encode(PuffinFrameCodec.commandField, innerCmd);
+
+    if (transport is SimulatedPuffinTransport) {
+      await transport.write(
+        frame,
+        characteristic: PuffinCharacteristic.cmdToStrap,
+      );
+      lastVibrationStatusNotifier.value = 0x01;
+      statusMessageNotifier.value =
+          'Comando sveglia 0x42 programmato (slot $slot, target: $targetSec).';
+      return true;
+    }
+
+    final completer = Completer<int>();
+    final subscription = transport.incomingFrames
+        .where((event) =>
+            event.characteristic == PuffinCharacteristic.cmdFromStrap)
+        .listen((event) {
+      final raw = event.frame.rawPayload;
+      if (raw.length >= 4 && raw[0] == 0x24 && raw[1] == seq && raw[2] == 0x42) {
         final status = raw.length >= 5 ? raw[4] : raw[3];
         if (!completer.isCompleted) completer.complete(status);
       }
@@ -282,15 +414,15 @@ class SyncService {
 
       if (status == -1) {
         statusMessageNotifier.value =
-            'Comando vibrazione 0x42 inviato, ma nessun ACK 0x24 ricevuto.';
+            'Comando sveglia 0x42 inviato, ma nessun ACK 0x24 ricevuto.';
         return false;
       }
 
       final statusHex = '0x${status.toRadixString(16).padLeft(2, '0').toUpperCase()}';
-      final ok = status == 0x00 || status == 0x01 || status == 0x02;
+      final ok = status == 0x01 || status == 0x00 || status == 0x02;
       statusMessageNotifier.value = ok
-          ? 'Vibrazione attivata con successo! Status ACK cinturino: $statusHex'
-          : 'Comando vibrazione respinto dal cinturino con status $statusHex';
+          ? 'Sveglia programmata con successo! Status ACK cinturino: $statusHex'
+          : 'Comando sveglia respinto dal cinturino con status $statusHex';
       return ok;
     } finally {
       await subscription.cancel();
@@ -349,14 +481,13 @@ class SyncService {
     // 1. Invia il comando 0x16 (START_HISTORICAL_OFFLOAD) su CMD_TO_STRAP
     final startSeq = _nextSeq();
     final startCmd = Uint8List.fromList([0x23, startSeq, 0x16, 0x00]);
-    final startFrame = PuffinFrameCodec.encode(1, startCmd);
+    final startFrame = PuffinFrameCodec.encode(PuffinFrameCodec.commandField, startCmd);
     await transport.write(
       startFrame,
       characteristic: PuffinCharacteristic.cmdToStrap,
     );
 
     var saved = 0;
-    Uint8List? lastCursor;
     final completer = Completer<int>();
     _activeRealSyncCompleter = completer;
 
@@ -386,26 +517,24 @@ class SyncService {
 
       if (opcode == 0x31) {
         // Auto-ACK 0x31 METADATA_CURSOR -> invio 0x17 con cursor 8 byte estratto da bytes 13..20
+        // Obbligatorio inviare l'ACK 0x17 per OGNI frame 0x31 ricevuto (Regola 6).
         if (raw.length >= 21) {
           final cursor = raw.sublist(13, 21);
-          if (lastCursor == null || !_bytesEqual(cursor, lastCursor!)) {
-            lastCursor = Uint8List.fromList(cursor);
-            final ackSeq = _nextSeq();
-            final ackPayload = Uint8List.fromList([
-              0x23,
-              ackSeq,
-              0x17, // Opcode ACK_CURSOR
-              0x01,
-              ...cursor,
-            ]);
-            final ackFrame = PuffinFrameCodec.encode(1, ackPayload);
-            try {
-              await transport.write(
-                ackFrame,
-                characteristic: PuffinCharacteristic.cmdToStrap,
-              );
-            } catch (_) {}
-          }
+          final ackSeq = _nextSeq();
+          final ackPayload = Uint8List.fromList([
+            0x23,
+            ackSeq,
+            0x17, // Opcode ACK_CURSOR
+            0x01,
+            ...cursor,
+          ]);
+          final ackFrame = PuffinFrameCodec.encode(PuffinFrameCodec.commandField, ackPayload);
+          try {
+            await transport.write(
+              ackFrame,
+              characteristic: PuffinCharacteristic.cmdToStrap,
+            );
+          } catch (_) {}
         }
         resetIdleTimer();
       } else if (opcode == 0x2F && raw.length >= 2 && raw[1] == 0x12) {

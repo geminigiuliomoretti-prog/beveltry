@@ -99,6 +99,48 @@ void main() {
       expect(metrics.hasValidMetrics, isTrue);
     });
 
+    test('MetricsService calcola metriche anche su record disallineati nel tempo (Fix database vuoto)', () async {
+      // Record registrati 30 giorni fa (o con orologio del cinturino non sincronizzato con il telefono)
+      final pastDate = DateTime.utc(2025, 5, 1, 0, 0, 0);
+      final records = <V18Record>[];
+
+      for (var i = 0; i < 350; i++) {
+        records.add(
+          V18Record(
+            seq: 1000 + i,
+            timestamp: pastDate.add(Duration(seconds: i)),
+            hrPrimary: 55,
+            hrSecondary: 55,
+            rrCount: 1,
+            rrIntervalsMs: [i % 2 == 0 ? 820 : 880],
+            gravityX: 0.0,
+            gravityY: 0.0,
+            gravityZ: 1.0,
+            accelMagG: 1.0,
+            stepCounter: 0,
+            skinTempRaw: 320,
+            skinTempCelsius: 32.0,
+            activityFlag: 0,
+            spo2Candidate: 0,
+            sleepState: 2,
+            opticalBaselineCh1: 35000,
+            opticalBaselineCh2: 35000,
+            opticalBaseline: 35000,
+            isOnWrist: true,
+          ),
+        );
+      }
+
+      await repository.saveV18RecordsBatch(records, '5AG0558675');
+
+      // Calcola senza referenceTime (default usa DateTime.now()): NON deve restituire database vuoto!
+      final metrics = await metricsService.calculateMetricsForLastNight();
+      expect(metrics.recordCount, equals(350));
+      expect(metrics.rhr, equals(55));
+      expect(metrics.hrvRmssd, isNotNull);
+      expect(metrics.hasValidMetrics, isTrue);
+    });
+
     test('SyncService scarica e persiste i record notificando lo stato', () async {
       expect(syncService.statusNotifier.value, equals(SyncStatus.idle));
 

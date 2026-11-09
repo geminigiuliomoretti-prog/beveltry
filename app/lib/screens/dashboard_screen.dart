@@ -182,13 +182,12 @@ class DashboardScreenState extends State<DashboardScreen> {
 
   Future<void> _handleTestVibration() async {
     setState(() => _isVibrating = true);
-    _addLog('Invio comando vibrazione 0x42 (slot 1)...');
+    _addLog('Invio comando vibrazione immediata 0x13 (pattern: 2, loops: 3)...');
 
     try {
       final success = await _syncService.sendVibration(
-        slot: 1,
-        pattern: 1,
-        durationMs: 1000,
+        pattern: 2,
+        loops: 3,
       );
       final statusByte = _syncService.lastVibrationStatusNotifier.value;
       final statusHex = statusByte != null
@@ -196,7 +195,7 @@ class DashboardScreenState extends State<DashboardScreen> {
           : 'N/A';
       if (success) {
         _addLog(
-          'Vibrazione attivata con successo sul cinturino (0x42)! Status ACK: $statusHex.',
+          'Vibrazione attivata con successo sul cinturino (0x13)! Status ACK: $statusHex.',
         );
       } else {
         _addLog(
@@ -736,22 +735,22 @@ class DashboardScreenState extends State<DashboardScreen> {
             const SizedBox(height: 10),
             _buildTroubleshootStep(
               icon: Icons.close,
-              text: 'Chiudere l\'app ufficiale WHOOP.',
+              text: 'Disaccoppiare il WHOOP dall\'app ufficiale (Impostazioni Dispositivo -> Avanzate -> Disaccoppia) e chiuderla.',
             ),
             const SizedBox(height: 6),
             _buildTroubleshootStep(
               icon: Icons.bluetooth_disabled,
-              text: 'Dimenticare il WHOOP dalle impostazioni Bluetooth del telefono.',
+              text: 'Dimenticare il WHOOP dalle impostazioni Bluetooth dello smartphone.',
             ),
             const SizedBox(height: 6),
             _buildTroubleshootStep(
-              icon: Icons.restart_alt,
-              text: 'Riavviare il Bluetooth o il telefono.',
+              icon: Icons.pan_tool,
+              text: 'Togliere il WHOOP dal polso (LED verdi spenti, afferrare solo dai bordi).',
             ),
             const SizedBox(height: 6),
             _buildTroubleshootStep(
               icon: Icons.touch_app,
-              text: 'Rimettere il WHOOP in pairing mode (LED blu fisso).',
+              text: 'Picchiettare 5-8 volte sul dorso fino al LED blu lampeggiante/fisso.',
             ),
           ],
         ),
@@ -785,11 +784,15 @@ class DashboardScreenState extends State<DashboardScreen> {
               children: [
                 Icon(icon, color: color, size: 22),
                 const SizedBox(width: 8),
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15,
+                Expanded(
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                    ),
                   ),
                 ),
               ],

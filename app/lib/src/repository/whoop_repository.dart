@@ -207,6 +207,63 @@ class WhoopRepository {
     }).toList();
   }
 
+  /// Recupera gli ultimi [limit] record [V18Record] registrati nel database,
+  /// ordinati cronologicamente in modo crescente per l'analisi DSP.
+  ///
+  /// Questo metodo risolve il problema del "database vuoto" dovuto a sfasamenti
+  /// di orologio o mancato allineamento con DateTime.now().
+  Future<List<V18Record>> getLatestRecords({
+    int limit = 5000,
+    String? strapSerial,
+  }) async {
+    final db = await _db;
+    final String? whereClause;
+    final List<Object?>? whereArgs;
+
+    if (strapSerial != null) {
+      whereClause = 'strap_serial = ?';
+      whereArgs = [strapSerial];
+    } else {
+      whereClause = null;
+      whereArgs = null;
+    }
+
+    final rows = await db.query(
+      'v18_records',
+      where: whereClause,
+      whereArgs: whereArgs,
+      orderBy: 'timestamp DESC, seq DESC',
+      limit: limit,
+    );
+
+    if (rows.isEmpty) return <V18Record>[];
+
+    final recordIds = rows.map((r) => r['id'] as int).toList();
+    final placeholders = List.filled(recordIds.length, '?').join(',');
+
+    final rrRows = await db.query(
+      'rr_intervals',
+      where: 'v18_record_id IN ($placeholders)',
+      whereArgs: recordIds,
+      orderBy: 'v18_record_id ASC, beat_ordinal ASC',
+    );
+
+    final rrMap = <int, List<int>>{};
+    for (final rr in rrRows) {
+      final recId = rr['v18_record_id'] as int;
+      final ms = rr['rr_ms'] as int;
+      (rrMap[recId] ??= <int>[]).add(ms);
+    }
+
+    final records = rows.map((row) {
+      final id = row['id'] as int;
+      final rrs = rrMap[id] ?? const <int>[];
+      return _mapRowToV18Record(row, rrs);
+    }).toList();
+
+    return records.reversed.toList();
+  }
+
   /// Salva l'ultimo cursore offload ricevuto per l'ACK su `fd4b0002`.
   Future<void> saveCursor(
     Uint8List cursor, {

@@ -47,6 +47,7 @@ class PuffinFrameCodec {
   PuffinFrameCodec._();
 
   static const int headerSize = 8;
+  static const int commandField = 1; // 0x0001 LE -> bytes 01 00 sul cavo
   static const Set<int> blockedOpcodes = {0x19, 0x1D};
 
   /// Legge un intero a 16 bit unsigned in ordine little-endian.

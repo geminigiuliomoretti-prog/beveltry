@@ -24,10 +24,20 @@ class MethodChannelPuffinTransport implements PuffinTransport {
 
   final StreamController<PuffinIncomingFrame> _incomingFramesController =
       StreamController<PuffinIncomingFrame>.broadcast();
+  final StreamController<Uint8List> _standardHrController =
+      StreamController<Uint8List>.broadcast();
+  final StreamController<bool> _connectionChangeController =
+      StreamController<bool>.broadcast();
 
   @override
   Stream<PuffinIncomingFrame> get incomingFrames =>
       _incomingFramesController.stream;
+
+  @override
+  Stream<Uint8List> get standardHrStream => _standardHrController.stream;
+
+  @override
+  Stream<bool> get onConnectionChanged => _connectionChangeController.stream;
 
   void Function()? _onBondingStartedCallback;
 
@@ -51,6 +61,17 @@ class MethodChannelPuffinTransport implements PuffinTransport {
         }
       case 'onBondingStarted':
         _onBondingStartedCallback?.call();
+      case 'onStandardHr':
+        final bytes = call.arguments as Uint8List;
+        _standardHrController.add(bytes);
+        break;
+
+      case 'onConnectionChanged':
+        final connected = call.arguments as bool;
+        _isConnected = connected;
+        _connectionChangeController.add(connected);
+        break;
+
       case 'onFrameReceived':
         final map = Map<String, dynamic>.from(call.arguments as Map);
         final rawBytes = map['payload'] as Uint8List?;
