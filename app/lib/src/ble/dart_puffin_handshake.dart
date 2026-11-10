@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:math';
 import 'dart:typed_data';
 
 import 'puffin_frame_codec.dart';
@@ -97,10 +95,10 @@ class DartPuffinHandshake {
       throw DartPuffinHandshakeException('Trasporto BLE non connesso');
     }
 
-    // 1. Invia 0x91 GET_HELLO (field = 1 -> wire bytes 01 00, b3 = 0x03)
+    // 1. Invia 0x91 GET_HELLO (field = 1 -> wire bytes 01 00, b3 = 0x01 da cattura firmware reale)
     onProgress?.call('Invio HELLO (0x91)...');
     final helloSeq = _nextSeq();
-    final helloPayload = Uint8List.fromList([0x23, helloSeq, 0x91, 0x03]);
+    final helloPayload = Uint8List.fromList([0x23, helloSeq, 0x91, 0x01]);
     final helloResp = await _sendAndAcknowledge(
       payload: helloPayload,
       opcode: 0x91,
@@ -110,11 +108,11 @@ class DartPuffinHandshake {
     );
     onProgress?.call('HELLO confermato dal cinturino (LED spento).');
 
-    // 2. Lettura Advertising Name (0x8D, b3 = 0x01)
+    // 2. Lettura Advertising Name (0x8D, b3 = 0x00 da cattura firmware reale)
     onProgress?.call('Lettura Advertising Name (0x8D)...');
     try {
       final nameSeq = _nextSeq();
-      final namePayload = Uint8List.fromList([0x23, nameSeq, 0x8D, 0x01]);
+      final namePayload = Uint8List.fromList([0x23, nameSeq, 0x8D, 0x00]);
       await _sendAndAcknowledge(
         payload: namePayload,
         opcode: 0x8D,
@@ -184,25 +182,28 @@ class DartPuffinHandshake {
               event.characteristic == PuffinCharacteristic.cmdFromStrap)
           .listen((event) {
         final raw = event.frame.rawPayload;
-        // Risposta 0x24: [0x24, echo_seq, resp_cmd, strap_seq, resp_status, ...payload]
-        // Se raw.length >= 5: byte[3] = strap_seq, byte[4] = resp_status.
-        // Se raw.length == 4 (legacy): byte[3] = resp_status.
-        if (raw.length >= 4 &&
-            raw[0] == 0x24 &&
-            (expectedSeq == null || raw[1] == expectedSeq) &&
-            raw[2] == opcode) {
-          final status = raw.length >= 5 ? raw[4] : raw[3];
-          if (allowedStatuses.contains(status)) {
-            if (!completer.isCompleted) completer.complete(event.frame);
-          } else {
-            if (!completer.isCompleted) {
-              completer.completeError(
-                DartPuffinHandshakeException(
-                  'Comando 0x${opcode.toRadixString(16)} rifiutato dal cinturino con status 0x${status.toRadixString(16)}',
-                  opcode: opcode,
-                  status: status,
-                ),
-              );
+        if (raw.length >= 4 && raw[0] == 0x24 && raw[2] == opcode) {
+          // Nel firmware reale WHOOP 5.0 (cattura btsnoop_hci):
+          // [0x24, strap_seq, cmd, echo_seq, status, ...] -> echo_seq è a byte[3] e status a byte[4].
+          // Nei mock/test legacy: [0x24, echo_seq, cmd, strap_seq, status] -> echo_seq è a byte[1].
+          final bool matchesSeq = expectedSeq == null ||
+              (raw.length >= 5 && raw[3] == expectedSeq) ||
+              raw[1] == expectedSeq;
+
+          if (matchesSeq) {
+            final status = raw.length >= 5 ? raw[4] : raw[3];
+            if (allowedStatuses.contains(status)) {
+              if (!completer.isCompleted) completer.complete(event.frame);
+            } else {
+              if (!completer.isCompleted) {
+                completer.completeError(
+                  DartPuffinHandshakeException(
+                    'Comando 0x${opcode.toRadixString(16)} rifiutato dal cinturino con status 0x${status.toRadixString(16)}',
+                    opcode: opcode,
+                    status: status,
+                  ),
+                );
+              }
             }
           }
         }

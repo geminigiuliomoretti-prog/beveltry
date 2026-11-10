@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'screens/dashboard_screen.dart';
@@ -9,7 +10,13 @@ import 'src/services/sync_service.dart';
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   final repository = WhoopRepository();
-  final transport = BlePuffinTransport();
+
+  // Su Android usiamo il trasporto nativo MethodChannel collegato a WhoopConnectionService.
+  // Su altre piattaforme o test fallback a BlePuffinTransport.
+  final transport = (defaultTargetPlatform == TargetPlatform.android && !kIsWeb)
+      ? MethodChannelPuffinTransport()
+      : BlePuffinTransport();
+
   final syncService = SyncService(
     repository: repository,
     transport: transport,

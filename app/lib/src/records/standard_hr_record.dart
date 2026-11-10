@@ -2,17 +2,28 @@ import 'dart:typed_data';
 
 import 'record_decode_exception.dart';
 
-/// Decodifica il payload WHOOP della caratteristica Heart Rate Measurement.
+/// Decodifica il payload WHOOP della caratteristica Heart Rate Measurement (0x2A37).
 class StandardHrRecord {
   const StandardHrRecord({
     required this.hr,
     required this.energyExpended,
     required this.rrIntervalsMs,
-  });
+    List<int>? rawRrIntervals,
+    List<double>? rrIntervals1024Ms,
+  })  : rawRrIntervals = rawRrIntervals ?? rrIntervalsMs,
+        rrIntervals1024Ms = rrIntervals1024Ms ?? const [];
 
   final int hr;
   final int? energyExpended;
+
+  /// Intervalli R-R grezzi in millisecondi diretti (WHOOP 5.0).
   final List<int> rrIntervalsMs;
+
+  /// Copia esplicita degli intervalli R-R grezzi u16 originali.
+  final List<int> rawRrIntervals;
+
+  /// Intervalli R-R convertiti secondo lo standard Bluetooth SIG 1/1024s (raw * 1000 / 1024).
+  final List<double> rrIntervals1024Ms;
 
   static StandardHrRecord decode(Uint8List payload) {
     if (payload.isEmpty) {
@@ -35,15 +46,18 @@ class StandardHrRecord {
       offset += 2;
     }
 
-    final rrIntervals = <int>[];
+    final rawRrList = <int>[];
+    final rr1024List = <double>[];
     if ((flags & 0x10) != 0) {
       final remaining = payload.length - offset;
       if (remaining.isOdd) {
         throw const RecordDecodeException('0x2A37: intervallo R-R incompleto');
       }
       while (offset < payload.length) {
-        // Nel flusso WHOOP questi u16 sono già millisecondi: nessuna conversione.
-        rrIntervals.add(data.getUint16(offset, Endian.little));
+        final rawU16 = data.getUint16(offset, Endian.little);
+        rawRrList.add(rawU16);
+        // Calcolo conforme alla specifica Bluetooth SIG (1/1024 di secondo)
+        rr1024List.add(rawU16 * 1000.0 / 1024.0);
         offset += 2;
       }
     } else if (offset != payload.length) {
@@ -53,7 +67,9 @@ class StandardHrRecord {
     return StandardHrRecord(
       hr: hr,
       energyExpended: energyExpended,
-      rrIntervalsMs: List<int>.unmodifiable(rrIntervals),
+      rrIntervalsMs: List<int>.unmodifiable(rawRrList),
+      rawRrIntervals: List<int>.unmodifiable(rawRrList),
+      rrIntervals1024Ms: List<double>.unmodifiable(rr1024List),
     );
   }
 

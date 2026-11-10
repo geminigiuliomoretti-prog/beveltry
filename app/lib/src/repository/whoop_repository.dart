@@ -1,8 +1,14 @@
+import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../database/whoop_database.dart';
+import '../dsp/hrv_rmssd.dart';
+import '../dsp/rhr_calculator.dart';
+import '../records/night_session_summary.dart';
 import '../records/v18_record.dart';
 import '../records/v26_record.dart';
 
@@ -376,6 +382,412 @@ class WhoopRepository {
     );
 
     return rows.map((r) => r['rr_ms'] as int).toList();
+  }
+
+  // =========================================================================
+  // METODI NIGHT RECORDER (Task 07)
+  // =========================================================================
+
+  /// Avvia una nuova sessione di registrazione notturna.
+  Future<void> startNightSession({
+    required String sessionId,
+    required String deviceAddress,
+    String? deviceName,
+    DateTime? startTime,
+  }) async {
+    final db = await _db;
+    final nowMs = (startTime ?? DateTime.now()).toUtc().millisecondsSinceEpoch;
+    await db.insert(
+      'night_sessions',
+      {
+        'session_id': sessionId,
+        'start_time_utc': nowMs,
+        'device_address': deviceAddress,
+        'device_name': deviceName ?? 'WHOOP 5.0',
+        'status': 'RECORDING',
+        'total_samples': 0,
+        'total_rr': 0,
+        'disconnections_count': 0,
+        'last_sample_time_utc': nowMs,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Salva un singolo campione HR notturno in una transazione isolata.
+  Future<void> saveNightSample({
+    required String sessionId,
+    required DateTime timestamp,
+    required int monotonicMillis,
+    required int hrBpm,
+    required int flags,
+    required int sensorContact,
+    required String rrStatus,
+    String origin = 'GATT_0x2A37',
+    String connState = 'CONNECTED',
+    List<int> rawRrIntervals = const [],
+  }) async {
+    final db = await _db;
+    final tsMs = timestamp.toUtc().millisecondsSinceEpoch;
+
+    await db.transaction((txn) async {
+      final sampleId = await txn.insert(
+        'night_samples',
+        {
+          'session_id': sessionId,
+          'timestamp_utc': tsMs,
+          'monotonic_millis': monotonicMillis,
+          'hr_bpm': hrBpm,
+          'flags': flags,
+          'sensor_contact': sensorContact,
+          'rr_status': rrStatus,
+          'origin': origin,
+          'conn_state': connState,
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+
+      if (sampleId <= 0) return;
+
+      for (var i = 0; i < rawRrIntervals.length; i++) {
+        final rawRr = rawRrIntervals[i];
+        final rrMsDirect = rawRr;
+        final rrMs1024 = rawRr * 1000.0 / 1024.0;
+
+        await txn.insert(
+          'night_rr_intervals',
+          {
+            'sample_id': sampleId,
+            'session_id': sessionId,
+            'timestamp_utc': tsMs,
+            'beat_ordinal': i,
+            'rr_raw': rawRr,
+            'rr_ms_direct': rrMsDirect,
+            'rr_ms_1024': rrMs1024,
+          },
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+      }
+
+      await txn.rawUpdate('''
+        UPDATE night_sessions 
+        SET total_samples = total_samples + 1,
+            total_rr = total_rr + ?,
+            last_sample_time_utc = ?
+        WHERE session_id = ?
+      ''', [rawRrIntervals.length, tsMs, sessionId]);
+    });
+  }
+
+  /// Registra un evento di connessione o disconnessione durante la notte.
+  Future<void> logNightEvent({
+    required String sessionId,
+    required DateTime timestamp,
+    required int monotonicMillis,
+    required String eventType,
+    String? details,
+  }) async {
+    final db = await _db;
+    final tsMs = timestamp.toUtc().millisecondsSinceEpoch;
+
+    await db.transaction((txn) async {
+      await txn.insert('night_events', {
+        'session_id': sessionId,
+        'timestamp_utc': tsMs,
+        'monotonic_millis': monotonicMillis,
+        'event_type': eventType,
+        'details': details,
+      });
+
+      if (eventType == 'DISCONNECTED') {
+        await txn.rawUpdate('''
+          UPDATE night_sessions 
+          SET disconnections_count = disconnections_count + 1 
+          WHERE session_id = ?
+        ''', [sessionId]);
+      }
+    });
+  }
+
+  /// Conclude la sessione di registrazione notturna.
+  Future<void> endNightSession({
+    required String sessionId,
+    String status = 'COMPLETED',
+    DateTime? endTime,
+  }) async {
+    final db = await _db;
+    final nowMs = (endTime ?? DateTime.now()).toUtc().millisecondsSinceEpoch;
+    await db.update(
+      'night_sessions',
+      {
+        'end_time_utc': nowMs,
+        'status': status,
+      },
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+    );
+  }
+
+  /// Calcola ed esporta il rapporto del mattino completo per una sessione notturna.
+  Future<NightSessionSummary> getNightSessionSummary(String sessionId) async {
+    final db = await _db;
+
+    // 1. Dati della sessione
+    final sessionRows = await db.query(
+      'night_sessions',
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+      limit: 1,
+    );
+
+    if (sessionRows.isEmpty) {
+      throw ArgumentError('Sessione $sessionId non trovata nel database.');
+    }
+
+    final sRow = sessionRows.first;
+    final startMs = sRow['start_time_utc'] as int;
+    final endMs = sRow['end_time_utc'] as int? ?? DateTime.now().toUtc().millisecondsSinceEpoch;
+    final startTimeUtc = DateTime.fromMillisecondsSinceEpoch(startMs, isUtc: true);
+    final endTimeUtc = sRow['end_time_utc'] != null
+        ? DateTime.fromMillisecondsSinceEpoch(endMs, isUtc: true)
+        : null;
+    final deviceAddress = sRow['device_address'] as String? ?? 'UNKNOWN';
+    final deviceName = sRow['device_name'] as String? ?? 'WHOOP 5.0';
+    final status = sRow['status'] as String? ?? 'RECORDING';
+    final totalSamples = sRow['total_samples'] as int? ?? 0;
+    final totalRr = sRow['total_rr'] as int? ?? 0;
+    final disconnectionsCount = sRow['disconnections_count'] as int? ?? 0;
+
+    final durationSeconds = ((endMs - startMs) / 1000).round().clamp(0, double.infinity).toInt();
+
+    // 2. Campioni HR per calcolo medie e RHR
+    final sampleRows = await db.query(
+      'night_samples',
+      columns: ['timestamp_utc', 'hr_bpm'],
+      where: 'session_id = ? AND hr_bpm > 0 AND hr_bpm <= 240',
+      whereArgs: [sessionId],
+      orderBy: 'timestamp_utc ASC',
+    );
+
+    final hrValues = <int>[];
+    final hrPoints = <HrSamplePoint>[];
+    for (final row in sampleRows) {
+      final bpm = row['hr_bpm'] as int;
+      final ts = DateTime.fromMillisecondsSinceEpoch(row['timestamp_utc'] as int, isUtc: true);
+      hrValues.add(bpm);
+      hrPoints.add(HrSamplePoint(timestampUtc: ts, hrBpm: bpm));
+    }
+
+    double? meanHr;
+    double? medianHr;
+    int? minHr;
+    int? maxHr;
+    int? estimatedRhr;
+
+    if (hrValues.isNotEmpty) {
+      final sum = hrValues.fold<int>(0, (a, b) => a + b);
+      meanHr = sum / hrValues.length;
+
+      final sorted = List<int>.from(hrValues)..sort();
+      final mid = sorted.length ~/ 2;
+      medianHr = sorted.length.isOdd
+          ? sorted[mid].toDouble()
+          : (sorted[mid - 1] + sorted[mid]) / 2.0;
+
+      minHr = sorted.first;
+      maxHr = sorted.last;
+
+      // RHR con finestra mobile a 5 minuti (300 campioni validi)
+      estimatedRhr = calculateRhrFromHrValues(hrValues, windowSize: 300);
+    }
+
+    // 3. Intervalli R-R e calcolo HRV RMSSD (v1 legacy + v2 segmentato gap-aware)
+    final rrRows = await db.query(
+      'night_rr_intervals',
+      columns: ['timestamp_utc', 'beat_ordinal', 'rr_ms_direct'],
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+      orderBy: 'timestamp_utc ASC, beat_ordinal ASC',
+    );
+
+    final beatIntervals = rrRows.map((r) {
+      final ts = DateTime.fromMillisecondsSinceEpoch(r['timestamp_utc'] as int, isUtc: true);
+      final rr = r['rr_ms_direct'] as int;
+      final ord = r['beat_ordinal'] as int? ?? 0;
+      return BeatInterval(timestampUtc: ts, rrMs: rr, beatOrdinal: ord);
+    }).toList();
+
+    final hrvResult = calculateSegmentedHrv(
+      beats: beatIntervals,
+      gapThresholdSeconds: 2.0,
+      minPhysiologicalMs: 300,
+      maxPhysiologicalMs: 2000,
+    );
+
+    // 4. Disconnessioni e durata offline
+    final eventRows = await db.query(
+      'night_events',
+      columns: ['timestamp_utc', 'event_type'],
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+      orderBy: 'timestamp_utc ASC',
+    );
+
+    var disconnectionDurationSeconds = 0;
+    int? disconnectStartMs;
+    for (final ev in eventRows) {
+      final type = ev['event_type'] as String;
+      final ts = ev['timestamp_utc'] as int;
+      if (type == 'DISCONNECTED') {
+        disconnectStartMs = ts;
+      } else if (type == 'CONNECTED' && disconnectStartMs != null) {
+        disconnectionDurationSeconds += ((ts - disconnectStartMs) / 1000).round();
+        disconnectStartMs = null;
+      }
+    }
+    if (disconnectStartMs != null && endTimeUtc != null) {
+      disconnectionDurationSeconds += ((endMs - disconnectStartMs) / 1000).round();
+    }
+
+    // 5. Percentuale di copertura (stimata assumendo 1 notifica al secondo)
+    final expectedSamples = durationSeconds > 0 ? durationSeconds : 1;
+    final coveragePercent = (totalSamples / expectedSamples * 100.0).clamp(0.0, 100.0);
+
+    // 6. Mappa metriche non disponibili con motivazione esplicita
+    final missingMetrics = <String, String>{
+      'Deep Sleep HRV': 'Il calcolo dell\'HRV specifico per il sonno profondo richiede la stadiazione proprietaria delle fasi del sonno.',
+      'WHOOP Recovery Score': 'Algoritmo proprietario WHOOP non simulato; calcolo disabilitato per preservare l\'integrità scientifica dei dati.',
+      'Fasi del Sonno (REM / Profondo / Leggero)': 'Richiede algoritmi proprietari combinati di accelerometria multiasse e fotopletismografia ottica.',
+      'SpO2 (Saturazione Ossigeno)': 'Bloccata a livello hardware dall\'Entitlement Gate del firmware WHOOP (byte @82 = 0x00 senza abbonamento attivo).',
+      'Frequenza Respiratoria': 'Richiede modello DSP proprietario sulle fluttuazioni respiratorie dell\'intervallo R-R.',
+      'Temperatura Cutanea': 'Disponibile esclusivamente nei record storici Puffin 0x2F v18 autenticati.',
+    };
+
+    return NightSessionSummary(
+      sessionId: sessionId,
+      startTimeUtc: startTimeUtc,
+      endTimeUtc: endTimeUtc,
+      deviceAddress: deviceAddress,
+      deviceName: deviceName,
+      status: status,
+      totalSamples: totalSamples,
+      totalRr: totalRr,
+      disconnectionsCount: disconnectionsCount,
+      meanHr: meanHr,
+      medianHr: medianHr,
+      minHr: minHr,
+      maxHr: maxHr,
+      rmssdMs: hrvResult.legacyRmssdMs,
+      segmentedRmssdMs: hrvResult.segmentedRmssdMs,
+      segmentedRmssd1024Ms: hrvResult.segmentedRmssd1024Ms,
+      legacyRmssd1024Ms: hrvResult.legacyRmssd1024Ms,
+      excludedPhysiologicalBeats: hrvResult.excludedPhysiologicalBeats,
+      excludedGapsCount: hrvResult.excludedGapsCount,
+      segmentsCount: hrvResult.segmentsCount,
+      validSuccessiveDiffsCount: hrvResult.validSuccessiveDiffsCount,
+      estimatedRhr: estimatedRhr,
+      coveragePercent: coveragePercent,
+      totalDurationSeconds: durationSeconds,
+      disconnectionDurationSeconds: disconnectionDurationSeconds,
+      hrTimeSeries: hrPoints,
+      missingMetrics: missingMetrics,
+    );
+  }
+
+  /// Recupera tutte le sessioni notturne registrate nel database.
+  Future<List<Map<String, dynamic>>> getAllNightSessions() async {
+    final db = await _db;
+    return db.query('night_sessions', orderBy: 'start_time_utc DESC');
+  }
+
+  /// Esporta i dati notturni in un file CSV contenente [timestamp], [hr] e [rr_raw] grezzi.
+  ///
+  /// Conforme ai requisiti di integrità:
+  /// - NON modifica in alcun modo i dati originali nel database (sola lettura SELECT).
+  /// - NON include alcun identificativo Bluetooth (né MAC address, né device name, né UUID).
+  /// - Non altera gli intervalli R-R grezzi (Regola Inviolabile 2: ms diretti).
+  Future<File> exportNightDataToCsv({
+    String? sessionId,
+    String? targetFilePath,
+  }) async {
+    final db = await _db;
+
+    String? targetSessionId = sessionId;
+    if (targetSessionId == null) {
+      final latestSession = await db.query(
+        'night_sessions',
+        columns: ['session_id'],
+        orderBy: 'start_time_utc DESC',
+        limit: 1,
+      );
+      if (latestSession.isNotEmpty) {
+        targetSessionId = latestSession.first['session_id'] as String?;
+      }
+    }
+
+    final List<Map<String, Object?>> sampleRows;
+    if (targetSessionId != null) {
+      sampleRows = await db.rawQuery('''
+        SELECT 
+          s.id AS sample_id,
+          s.timestamp_utc,
+          s.hr_bpm,
+          r.rr_raw
+        FROM night_samples s
+        LEFT JOIN night_rr_intervals r ON s.id = r.sample_id
+        WHERE s.session_id = ?
+        ORDER BY s.timestamp_utc ASC, r.beat_ordinal ASC
+      ''', [targetSessionId]);
+    } else {
+      sampleRows = await db.rawQuery('''
+        SELECT 
+          s.id AS sample_id,
+          s.timestamp_utc,
+          s.hr_bpm,
+          r.rr_raw
+        FROM night_samples s
+        LEFT JOIN night_rr_intervals r ON s.id = r.sample_id
+        ORDER BY s.timestamp_utc ASC, r.beat_ordinal ASC
+      ''');
+    }
+
+    final buffer = StringBuffer();
+    buffer.writeln('timestamp,hr,rr_raw');
+
+    for (final row in sampleRows) {
+      final tsUtc = row['timestamp_utc'] as int;
+      final hr = row['hr_bpm'] as int;
+      final rrRaw = row['rr_raw'] as int?;
+      final isoTs = DateTime.fromMillisecondsSinceEpoch(tsUtc, isUtc: true).toIso8601String();
+      final rrStr = rrRaw != null ? '$rrRaw' : '';
+      buffer.writeln('$isoTs,$hr,$rrStr');
+    }
+
+    final File outputFile;
+    if (targetFilePath != null) {
+      outputFile = File(targetFilePath);
+    } else {
+      String? dirPath;
+      try {
+        final extDir = await getExternalStorageDirectory();
+        dirPath = extDir?.path;
+      } catch (_) {}
+      if (dirPath == null) {
+        try {
+          final docDir = await getApplicationDocumentsDirectory();
+          dirPath = docDir.path;
+        } catch (_) {
+          dirPath = Directory.systemTemp.path;
+        }
+      }
+      final sessSuffix = targetSessionId ?? 'all_${DateTime.now().toUtc().millisecondsSinceEpoch}';
+      final fileName = 'whoop_night_data_$sessSuffix.csv';
+      outputFile = File(p.join(dirPath, fileName));
+    }
+
+    await outputFile.parent.create(recursive: true);
+    await outputFile.writeAsString(buffer.toString(), flush: true);
+    return outputFile;
   }
 
   /// Chiude la connessione al database sottostante.

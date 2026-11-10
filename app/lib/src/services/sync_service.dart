@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:universal_ble/universal_ble.dart';
 
 import '../ble/ble.dart';
 import '../records/live28_record.dart';
@@ -67,6 +66,51 @@ class SyncService {
         liveRrNotifier.value = null;
       }
     });
+
+    if (transport is MethodChannelPuffinTransport) {
+      final nativeTransport = transport as MethodChannelPuffinTransport;
+      nativeTransport.onLiveHrBpm.listen((bpm) {
+        liveHrNotifier.value = bpm;
+      });
+      nativeTransport.onLiveRrMs.listen((rr) {
+        liveRrNotifier.value = rr;
+      });
+      nativeTransport.onConnectionStateChanged.listen((map) {
+        final isConnected = map['isConnected'] as bool? ?? false;
+        final isPuffin = map['isPuffinReady'] as bool? ?? false;
+        final dev = nativeTransport.connectedDevice ??
+            const WhoopDiscoveredDevice(name: 'WHOOP 5.0', macAddress: 'FD:49:44:66:1D:92');
+        if (isConnected) {
+          if (isPuffin) {
+            connectionStateNotifier.value = BleStatusPuffinProtocolReady(dev);
+            statusMessageNotifier.value = 'Connesso a ${dev.name} (Puffin Protocol Ready)';
+          } else {
+            connectionStateNotifier.value = BleStatusStandardHrConnected(dev);
+            statusMessageNotifier.value = 'Connesso SOLO a Standard HR (0x2A37) su ${dev.name}. Protocollo Puffin non disponibile.';
+          }
+        }
+      });
+      nativeTransport.onSyncProgress.listen((map) {
+        final saved = map['recordsSaved'] as int? ?? 0;
+        recordsSavedNotifier.value = saved;
+        final isComp = map['isCompleted'] as bool? ?? false;
+        final isAbort = map['isAborted'] as bool? ?? false;
+        final err = map['error'] as String?;
+        if (isComp) {
+          statusNotifier.value = SyncStatus.completed;
+          statusMessageNotifier.value = 'Sincronizzazione completata ($saved record salvati).';
+        } else if (isAbort) {
+          statusNotifier.value = SyncStatus.idle;
+          statusMessageNotifier.value = 'Sincronizzazione interrotta.';
+        } else if (err != null) {
+          statusNotifier.value = SyncStatus.error;
+          statusMessageNotifier.value = 'Errore sincronizzazione: $err';
+        } else {
+          statusNotifier.value = SyncStatus.syncing;
+          statusMessageNotifier.value = 'Sincronizzazione in corso ($saved record salvati)...';
+        }
+      });
+    }
   }
 
   final WhoopRepository repository;
@@ -179,20 +223,41 @@ class SyncService {
         return false;
       }
 
-      // 5. Solo dopo il bonding completato, inviare i comandi di handshake
-      if (transport is! SimulatedPuffinTransport) {
-        statusMessageNotifier.value = 'Esecuzione Handshake di autenticazione con il WHOOP...';
-        final handshake = DartPuffinHandshake(
-          transport,
-          timeout: handshakeTimeout,
-        );
-        await handshake.start(onProgress: (step) {
-          statusMessageNotifier.value = step;
-        }).timeout(handshakeTimeout);
+      // 5. Gestione handshake e isolamento Puffin (FASE 3)
+      if (transport is MethodChannelPuffinTransport) {
+        // Su Android, WhoopConnectionService gestisce la connessione nativa.
+        // Impostiamo provvisoriamente connected, lo stato dettagliato viene aggiornato via event flow.
+        connectionStateNotifier.value = BleStatusConnected(device);
+        statusMessageNotifier.value = 'Connesso a ${device.name}. Inizializzazione completata.';
+      } else if (transport is! SimulatedPuffinTransport) {
+        // Per BlePuffinTransport: isola l'handshake per non bloccare la connessione HR standard
+        try {
+          statusMessageNotifier.value = 'Esecuzione Handshake di autenticazione con il WHOOP...';
+          final handshake = DartPuffinHandshake(
+            transport,
+            timeout: handshakeTimeout,
+          );
+          await handshake.start(onProgress: (step) {
+            statusMessageNotifier.value = step;
+          }).timeout(handshakeTimeout);
+          connectionStateNotifier.value = BleStatusPuffinProtocolReady(device);
+          statusMessageNotifier.value = 'Connesso a ${device.name} (Puffin Protocol Ready)';
+        } catch (e) {
+          // FASE 3: Se HELLO 0x91 fallisce:
+          // 1. Registra il problema diagnostico.
+          // 2. Segna Puffin come non disponibile.
+          // 3. Mantieni la registrazione standard HR se continua a funzionare.
+          // 4. Non forzare un nuovo pairing.
+          // 5. Non entrare in un ciclo infinito di handshake.
+          // 6. Non cancellare dati acquisiti.
+          connectionStateNotifier.value = BleStatusStandardHrConnected(device);
+          statusMessageNotifier.value =
+              'Connesso SOLO a Standard HR (0x2A37). Protocollo Puffin non disponibile ($e).';
+        }
+      } else {
+        connectionStateNotifier.value = BleStatusPuffinProtocolReady(device);
+        statusMessageNotifier.value = 'Connesso a ${device.name} (Simulato)';
       }
-
-      connectionStateNotifier.value = BleStatusConnected(device, isHardwareVerified: true);
-      statusMessageNotifier.value = 'Connesso a ${device.name} (Verificato Hardware)';
       return true;
     } on BleBondException catch (e) {
       connectionStateNotifier.value =
@@ -278,6 +343,18 @@ class SyncService {
     ]);
 
     final frame = PuffinFrameCodec.encode(PuffinFrameCodec.commandField, innerCmd);
+
+    if (transport is MethodChannelPuffinTransport) {
+      final ok = await (transport as MethodChannelPuffinTransport).sendNativeVibration(
+        pattern: pattern,
+        loops: loops,
+      );
+      lastVibrationStatusNotifier.value = ok ? 0x01 : null;
+      statusMessageNotifier.value = ok
+          ? 'Vibrazione immediata 0x13 inviata al cinturino tramite WhoopConnectionService!'
+          : 'Invio vibrazione respinto o fallito.';
+      return ok;
+    }
 
     if (transport is SimulatedPuffinTransport) {
       await transport.write(
@@ -446,6 +523,11 @@ class SyncService {
     try {
       if (_customFrameStream != null) {
         return await _syncFromStream(_customFrameStream);
+      } else if (transport is MethodChannelPuffinTransport && transport.isConnected) {
+        statusNotifier.value = SyncStatus.syncing;
+        statusMessageNotifier.value = 'Avvio offload storico tramite WhoopConnectionService nativo...';
+        await (transport as MethodChannelPuffinTransport).startNativeSync();
+        return recordsSavedNotifier.value;
       } else if (transport.isConnected && transport is! SimulatedPuffinTransport) {
         return await _syncRealBle();
       } else if (simulateIfNoHardware) {
@@ -467,6 +549,9 @@ class SyncService {
   void stopSync() {
     if (isSyncing) {
       _isCancelled = true;
+      if (transport is MethodChannelPuffinTransport) {
+        (transport as MethodChannelPuffinTransport).stopNativeSync();
+      }
       if (_activeRealSyncCompleter != null && !_activeRealSyncCompleter!.isCompleted) {
         _activeRealSyncCompleter!.complete(recordsSavedNotifier.value);
       }
@@ -584,14 +669,6 @@ class SyncService {
       _activeRealSyncCompleter = null;
       await subscription.cancel();
     }
-  }
-
-  static bool _bytesEqual(List<int> a, List<int> b) {
-    if (a.length != b.length) return false;
-    for (var i = 0; i < a.length; i++) {
-      if (a[i] != b[i]) return false;
-    }
-    return true;
   }
 
   Future<int> _syncFromStream(Stream<Uint8List> stream) async {

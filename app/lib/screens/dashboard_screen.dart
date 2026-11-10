@@ -5,6 +5,8 @@ import 'package:beveltry/src/repository/whoop_repository.dart';
 import 'package:beveltry/src/services/metrics_service.dart';
 import 'package:beveltry/src/services/sync_service.dart';
 
+import 'night_recorder_screen.dart';
+
 /// Schermata principale della dashboard funzionale.
 ///
 /// Espone il flusso BLE esplicito:
@@ -94,8 +96,11 @@ class DashboardScreenState extends State<DashboardScreen> {
         _addLog('Stato BLE: Connessione GATT a ${d?.macAddress ?? ""}...');
       case BleStatusBonding(device: final d):
         _addLog('Stato BLE: Bonding in corso con ${d?.name ?? ""} (attesa popup)...');
+      case BleStatusStandardHrConnected(device: final d):
+        _addLog('Stato BLE: Connesso SOLO a Standard HR (0x2A37) su ${d.name}. Protocollo Puffin NON pronto.');
       case BleStatusConnected(device: final d):
-        _addLog('Stato BLE: Connesso a ${d.name}. Pulsanti azione abilitati.');
+        final readyText = state.isPuffinReady ? 'Puffin Protocol Ready' : 'Connesso';
+        _addLog('Stato BLE: Connesso a ${d.name} ($readyText).');
       case BleStatusError(message: final msg):
         _addLog('Stato BLE: Errore - $msg');
     }
@@ -126,7 +131,12 @@ class DashboardScreenState extends State<DashboardScreen> {
     _addLog('Avvio connessione e bonding a ${device.name} (${device.macAddress})...');
     final success = await _syncService.connectAndBond(device);
     if (!success) {
-      _addLog('Bonding fallito o annullato.');
+      if (_syncService.connectionStateNotifier.value is BleStatusError) {
+        _addLog((_syncService.connectionStateNotifier.value as BleStatusError).message);
+      } else {
+        final msg = _syncService.statusMessageNotifier.value;
+        _addLog('Connessione o autorizzazione non riuscita: $msg');
+      }
     }
   }
 
@@ -217,6 +227,22 @@ class DashboardScreenState extends State<DashboardScreen> {
       appBar: AppBar(
         title: const Text('Beveltry'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        actions: [
+          IconButton(
+            tooltip: 'Night Recorder',
+            icon: const Icon(Icons.nightlight_round, color: Colors.tealAccent),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (context) => NightRecorderScreen(
+                    repository: _repository,
+                    syncService: _syncService,
+                  ),
+                ),
+              );
+            },
+          ),
+        ],
       ),
       body: SafeArea(
         child: Padding(
@@ -224,6 +250,52 @@ class DashboardScreenState extends State<DashboardScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // Banner Accesso Rapido Night Recorder (Task 07)
+              InkWell(
+                key: const Key('night_recorder_entry_button'),
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (context) => NightRecorderScreen(
+                        repository: _repository,
+                        syncService: _syncService,
+                      ),
+                    ),
+                  );
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF141936),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.tealAccent.withValues(alpha: 0.4)),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.nightlight_round, color: Colors.tealAccent, size: 22),
+                      SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'MODALITÀ NIGHT RECORDER (Notte 9-10 Nov)',
+                              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.tealAccent),
+                            ),
+                            Text(
+                              'Acquisisce dati reali 0x2A37 tutta la notte (indipendente da Puffin)',
+                              style: TextStyle(fontSize: 11, color: Colors.grey),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(Icons.arrow_forward_ios, size: 14, color: Colors.tealAccent),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+
               // 1. Riquadri principali Metriche (RHR e HRV)
               Row(
                 children: [
@@ -449,6 +521,47 @@ class DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildBleConnectionSection(BleConnectionStatus status) {
+    if (status is BleStatusStandardHrConnected) {
+      return Card(
+        color: Colors.amber.shade900.withValues(alpha: 0.3),
+        shape: RoundedRectangleBorder(
+          side: BorderSide(color: Colors.amber.shade600),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14.0, vertical: 10.0),
+          child: Row(
+            children: [
+              const Icon(Icons.monitor_heart, color: Colors.amberAccent, size: 26),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Solo Battito Standard (Puffin NON pronto)',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                        color: Colors.amber.shade300,
+                      ),
+                    ),
+                    Text(
+                      'HR Live attivo su ${status.device.name}. Handshake proprietario non ancora convalidato.',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.grey.shade400,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     if (status is BleStatusConnected) {
       return Card(
         color: Colors.green.shade900.withValues(alpha: 0.3),

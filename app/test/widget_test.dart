@@ -34,6 +34,13 @@ void main() {
   }
 
   testWidgets('Dashboard UI: mostra titolo, 1. Cerca WHOOP e pulsanti azione disabilitati all\'avvio', (tester) async {
+    tester.view.physicalSize = const Size(1080, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
     final repository = WhoopRepository.inMemory();
 
     await tester.pumpWidget(createTestWidget(repository: repository));
@@ -78,6 +85,13 @@ void main() {
   });
 
   testWidgets('Dashboard UI: flusso completo Scan -> Select -> Connect/Bond -> Sync -> Calcola Metriche', (tester) async {
+    tester.view.physicalSize = const Size(1080, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
     final repository = WhoopRepository.inMemory();
     final transport = SimulatedPuffinTransport(
       isConnected: false,
@@ -143,7 +157,14 @@ void main() {
     await repository.close();
   });
 
-  testWidgets('Dashboard UI: click su Test Vibrazione invia il comando 0x42 solo se connesso', (tester) async {
+  testWidgets('Dashboard UI: click su Test Vibrazione invia il comando 0x13 solo se connesso', (tester) async {
+    tester.view.physicalSize = const Size(1080, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
     final repository = WhoopRepository.inMemory();
     final transport = SimulatedPuffinTransport(
       isConnected: false,
@@ -194,6 +215,13 @@ void main() {
   });
 
   testWidgets('Dashboard UI: bonding fallito o annullato mostra errore chiaro', (tester) async {
+    tester.view.physicalSize = const Size(1080, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
     final repository = WhoopRepository.inMemory();
     final transport = SimulatedPuffinTransport(
       isConnected: false,
@@ -239,6 +267,13 @@ void main() {
   });
 
   testWidgets('Dashboard UI: pulsante Guida Bluetooth mostra popup con istruzioni di pulizia e associazione', (tester) async {
+    tester.view.physicalSize = const Size(1080, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
     final repository = WhoopRepository.inMemory();
     final syncService = SyncService(
       repository: repository,

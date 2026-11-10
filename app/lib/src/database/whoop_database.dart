@@ -142,6 +142,78 @@ class WhoopDatabase {
         last_sync_time INTEGER NOT NULL
       );
     ''');
+
+    // Tabelle dedicate alla modalità NIGHT RECORDER (Task 07)
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS night_sessions (
+        session_id TEXT PRIMARY KEY,
+        start_time_utc INTEGER NOT NULL,
+        end_time_utc INTEGER,
+        device_address TEXT NOT NULL,
+        device_name TEXT,
+        status TEXT NOT NULL,
+        total_samples INTEGER NOT NULL DEFAULT 0,
+        total_rr INTEGER NOT NULL DEFAULT 0,
+        disconnections_count INTEGER NOT NULL DEFAULT 0,
+        last_sample_time_utc INTEGER
+      );
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS night_samples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        timestamp_utc INTEGER NOT NULL,
+        monotonic_millis INTEGER NOT NULL,
+        hr_bpm INTEGER NOT NULL,
+        flags INTEGER NOT NULL,
+        sensor_contact INTEGER NOT NULL DEFAULT -1,
+        rr_status TEXT NOT NULL,
+        origin TEXT NOT NULL,
+        conn_state TEXT NOT NULL,
+        UNIQUE(session_id, timestamp_utc, hr_bpm, monotonic_millis)
+      );
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_night_samples_sess 
+      ON night_samples(session_id, timestamp_utc);
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS night_rr_intervals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sample_id INTEGER NOT NULL REFERENCES night_samples(id) ON DELETE CASCADE,
+        session_id TEXT NOT NULL,
+        timestamp_utc INTEGER NOT NULL,
+        beat_ordinal INTEGER NOT NULL DEFAULT 0,
+        rr_raw INTEGER NOT NULL,
+        rr_ms_direct INTEGER NOT NULL,
+        rr_ms_1024 REAL NOT NULL,
+        UNIQUE(session_id, sample_id, beat_ordinal)
+      );
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_night_rr_sample 
+      ON night_rr_intervals(sample_id);
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS night_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        timestamp_utc INTEGER NOT NULL,
+        monotonic_millis INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        details TEXT
+      );
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_night_events_sess 
+      ON night_events(session_id, timestamp_utc);
+    ''');
   }
 
   /// Chiude la connessione al database se aperta.

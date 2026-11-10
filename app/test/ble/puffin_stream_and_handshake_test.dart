@@ -254,6 +254,39 @@ void main() {
       await handshakeFuture;
     });
 
+    test('0x91 valida layout reale Gen 5 btsnoop_hci (strap_seq=0x69, echo_seq=clientSeq, status=0x01)', () async {
+      final transport = MockPuffinTransport();
+      final handshake = DartPuffinHandshake(transport, timeout: const Duration(milliseconds: 300));
+
+      final handshakeFuture = handshake.start();
+
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      final helloFrame = PuffinFrameCodec.decode(transport.writtenFrames.first);
+      final clientSeq = helloFrame[1];
+
+      // Emula esattamente la risposta della cattura reale btsnoop_hci:
+      // byte[0]=0x24, byte[1]=0x69 (strap_seq disallineata!), byte[2]=0x91, byte[3]=clientSeq, byte[4]=0x01
+      transport.emit(Uint8List.fromList([0x24, 0x69, 0x91, clientSeq, 0x01, 0x00, 0xF9]));
+
+      for (var i = 0; i < 40; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        if (transport.writtenFrames.length > 1) {
+          final last = PuffinFrameCodec.decode(transport.writtenFrames.last);
+          final op = last[2];
+          final seq = last[1];
+          if (op == 0x0B) {
+            final nowBytes = Uint8List(4)..buffer.asByteData().setUint32(0, 1715000000, Endian.little);
+            transport.emit(Uint8List.fromList([0x24, 0x6A, 0x0B, seq, 0x01, ...nowBytes]));
+          } else {
+            transport.emit(Uint8List.fromList([0x24, 0x6B, op, seq, 0x01]));
+          }
+        }
+      }
+
+      await handshakeFuture;
+      expect(handshake, isNotNull);
+    });
+
     test('Handshake fallisce se il cinturino risponde con status di errore 0xFF su 0x91', () async {
       final transport = MockPuffinTransport();
       final handshake = DartPuffinHandshake(transport, timeout: const Duration(milliseconds: 200));
@@ -418,11 +451,6 @@ void main() {
     test('Retry su errore GATT 133 recupera con successo al secondo tentativo', () async {
       final simTransport = SimulatedPuffinTransport(
         simulate133FailuresBeforeSuccess: 1,
-      );
-      final testService = SyncService(
-        repository: repository,
-        transport: simTransport,
-        simulateIfNoHardware: true,
       );
 
       // Simula il transport che ritenta

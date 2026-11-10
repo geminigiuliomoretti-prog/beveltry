@@ -33,7 +33,9 @@ class WhoopDiscoveredDevice {
 sealed class BleConnectionStatus {
   const BleConnectionStatus();
 
-  bool get isConnected => this is BleStatusConnected;
+  bool get isConnected => this is BleStatusConnected || this is BleStatusStandardHrConnected;
+  bool get isPuffinReady => this is BleStatusPuffinProtocolReady || (this is BleStatusConnected && (this as BleStatusConnected).isHardwareVerified);
+  bool get isStandardHrOnly => this is BleStatusStandardHrConnected;
   bool get isConnectingOrBonding =>
       this is BleStatusConnecting || this is BleStatusBonding;
   bool get isScanning => this is BleStatusScanning;
@@ -80,6 +82,24 @@ class BleStatusBonding extends BleConnectionStatus {
 
   @override
   String toString() => 'Bonding(${device?.macAddress})';
+}
+
+/// Connesso al solo servizio BLE standard Heart Rate (0x180D / 0x2A37).
+/// Il protocollo proprietario Puffin non è ancora autenticato o pronto.
+class BleStatusStandardHrConnected extends BleConnectionStatus {
+  const BleStatusStandardHrConnected(this.device);
+  final WhoopDiscoveredDevice device;
+
+  @override
+  String toString() => 'StandardHrOnly(${device.name})';
+}
+
+/// Connessione e autenticazione Puffin complete: protocollo proprietario pronto per sync storica.
+class BleStatusPuffinProtocolReady extends BleStatusConnected {
+  const BleStatusPuffinProtocolReady(super.device) : super(isHardwareVerified: true);
+
+  @override
+  String toString() => 'PuffinProtocolReady(${device.name})';
 }
 
 /// Accoppiamento completato e trasporto pronto allo scambio frame.

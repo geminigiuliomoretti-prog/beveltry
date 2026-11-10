@@ -20,6 +20,10 @@ void main() {
 
     expect(record.hr, 72);
     expect(record.rrIntervalsMs, [864, 860]);
+    expect(record.rawRrIntervals, [864, 860]);
+    expect(record.rrIntervals1024Ms.length, 2);
+    expect(record.rrIntervals1024Ms[0], closeTo(864 * 1000.0 / 1024.0, 0.001));
+    expect(record.rrIntervals1024Ms[1], closeTo(860 * 1000.0 / 1024.0, 0.001));
     expect(payload, original);
   });
 
