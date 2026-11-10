@@ -9,6 +9,7 @@ import '../src/records/night_session_summary.dart';
 import '../src/records/standard_hr_record.dart';
 import '../src/repository/whoop_repository.dart';
 import '../src/services/sync_service.dart';
+import 'sleep_lab_screen.dart';
 
 /// Schermata minimale dedicata alla modalità NIGHT RECORDER (Task 07).
 ///
@@ -277,6 +278,7 @@ class _NightRecorderScreenState extends State<NightRecorderScreen> {
       final file = await widget.repository.exportNightDataToCsv(sessionId: sessionId);
       if (!mounted) return;
       final csvContent = await file.readAsString();
+      if (!mounted) return;
       final lineCount = csvContent.trim().split('\n').length;
       final rowCount = math.max(0, lineCount - 1);
 
@@ -508,6 +510,23 @@ class _NightRecorderScreenState extends State<NightRecorderScreen> {
       appBar: AppBar(
         title: const Text('Night Recorder'),
         backgroundColor: Colors.indigo.shade900,
+        actions: [
+          IconButton(
+            key: const Key('night_recorder_sleep_lab_button'),
+            tooltip: 'Sleep Lab',
+            icon: const Icon(Icons.science_outlined, color: Colors.purpleAccent),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (context) => SleepLabScreen(
+                    repository: widget.repository,
+                    initialSessionId: _latestSummary?.sessionId ?? _sessionId,
+                  ),
+                ),
+              );
+            },
+          ),
+        ],
       ),
       body: SafeArea(
         child: Padding(
@@ -619,6 +638,27 @@ class _NightRecorderScreenState extends State<NightRecorderScreen> {
                           icon: const Icon(Icons.description),
                           label: const Text('Visualizza Ultimo Report Generato'),
                           style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo),
+                        ),
+                        const SizedBox(height: 10),
+                        ElevatedButton.icon(
+                          key: const Key('open_sleep_lab_button'),
+                          onPressed: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (context) => SleepLabScreen(
+                                  repository: widget.repository,
+                                  initialSessionId: _latestSummary?.sessionId ?? _sessionId,
+                                ),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.science, color: Colors.purpleAccent),
+                          label: const Text('Apri in Beveltry Sleep Lab'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF26133B),
+                            foregroundColor: Colors.purpleAccent,
+                            side: const BorderSide(color: Colors.purpleAccent),
+                          ),
                         ),
                         const SizedBox(height: 10),
                       ],

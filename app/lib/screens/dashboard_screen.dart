@@ -6,6 +6,7 @@ import 'package:beveltry/src/services/metrics_service.dart';
 import 'package:beveltry/src/services/sync_service.dart';
 
 import 'night_recorder_screen.dart';
+import 'sleep_lab_screen.dart';
 
 /// Schermata principale della dashboard funzionale.
 ///
@@ -229,6 +230,20 @@ class DashboardScreenState extends State<DashboardScreen> {
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
           IconButton(
+            key: const Key('sleep_lab_appbar_button'),
+            tooltip: 'Sleep Lab',
+            icon: const Icon(Icons.science_outlined, color: Colors.purpleAccent),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (context) => SleepLabScreen(
+                    repository: _repository,
+                  ),
+                ),
+              );
+            },
+          ),
+          IconButton(
             tooltip: 'Night Recorder',
             icon: const Icon(Icons.nightlight_round, color: Colors.tealAccent),
             onPressed: () {
@@ -290,6 +305,51 @@ class DashboardScreenState extends State<DashboardScreen> {
                         ),
                       ),
                       Icon(Icons.arrow_forward_ios, size: 14, color: Colors.tealAccent),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+
+              // Banner Accesso Rapido Beveltry Sleep Lab (Task 08A)
+              InkWell(
+                key: const Key('sleep_lab_entry_button'),
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (context) => SleepLabScreen(
+                        repository: _repository,
+                      ),
+                    ),
+                  );
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1E1336),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.purpleAccent.withValues(alpha: 0.4)),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.science, color: Colors.purpleAccent, size: 22),
+                      SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'BEVELTRY SLEEP LAB (Task 08A)',
+                              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.purpleAccent),
+                            ),
+                            Text(
+                              'Analisi notturna deterministica, HRV Window Lab e confronto WHOOP A',
+                              style: TextStyle(fontSize: 11, color: Colors.grey),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(Icons.arrow_forward_ios, size: 14, color: Colors.purpleAccent),
                     ],
                   ),
                 ),

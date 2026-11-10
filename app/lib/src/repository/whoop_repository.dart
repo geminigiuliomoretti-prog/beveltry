@@ -11,6 +11,7 @@ import '../dsp/rhr_calculator.dart';
 import '../records/night_session_summary.dart';
 import '../records/v18_record.dart';
 import '../records/v26_record.dart';
+import '../sleep_lab/whoop_a_comparison.dart';
 
 /// Repository per la gestione persistente e deduplicata dei dati WHOOP 5.0.
 ///
@@ -788,6 +789,111 @@ class WhoopRepository {
     await outputFile.parent.create(recursive: true);
     await outputFile.writeAsString(buffer.toString(), flush: true);
     return outputFile;
+  }
+
+  // =========================================================================
+  // METODI SLEEP LAB & CONFRONTO WHOOP A (Task 08A)
+  // =========================================================================
+
+  /// Recupera tutti i campioni HR grezzi per una specifica sessione notturna.
+  Future<List<HrSamplePoint>> getRawNightSamples(String sessionId) async {
+    final db = await _db;
+    final rows = await db.query(
+      'night_samples',
+      columns: ['timestamp_utc', 'hr_bpm'],
+      where: 'session_id = ? AND hr_bpm > 0 AND hr_bpm <= 240',
+      whereArgs: [sessionId],
+      orderBy: 'timestamp_utc ASC',
+    );
+
+    return rows.map((r) {
+      return HrSamplePoint(
+        timestampUtc: DateTime.fromMillisecondsSinceEpoch(r['timestamp_utc'] as int, isUtc: true),
+        hrBpm: r['hr_bpm'] as int,
+      );
+    }).toList();
+  }
+
+  /// Recupera tutti gli intervalli R-R grezzi per una specifica sessione notturna.
+  Future<List<BeatInterval>> getRawNightRrIntervals(String sessionId) async {
+    final db = await _db;
+    final rows = await db.query(
+      'night_rr_intervals',
+      columns: ['timestamp_utc', 'beat_ordinal', 'rr_raw', 'rr_ms_direct'],
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+      orderBy: 'timestamp_utc ASC, beat_ordinal ASC',
+    );
+
+    return rows.map((r) {
+      final ts = DateTime.fromMillisecondsSinceEpoch(r['timestamp_utc'] as int, isUtc: true);
+      final rr = (r['rr_ms_direct'] ?? r['rr_raw']) as int;
+      final ord = r['beat_ordinal'] as int? ?? 0;
+      return BeatInterval(timestampUtc: ts, rrMs: rr, beatOrdinal: ord);
+    }).toList();
+  }
+
+  /// Salva o aggiorna i dati ufficiali WHOOP A per una notte.
+  Future<void> saveWhoopAComparison(WhoopAComparisonRecord record) async {
+    final db = await _db;
+    await db.insert(
+      'whoop_a_comparisons',
+      record.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Recupera il confronto WHOOP A associato alla sessione, se presente.
+  Future<WhoopAComparisonRecord?> getWhoopAComparisonForSession(String sessionId) async {
+    final db = await _db;
+    final rows = await db.query(
+      'whoop_a_comparisons',
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return WhoopAComparisonRecord.fromMap(rows.first);
+  }
+
+  /// Salva i confini di sonno corretti manualmente dall'utente.
+  Future<void> saveManualSleepBoundaries({
+    required String sessionId,
+    DateTime? manualOnset,
+    DateTime? manualEnd,
+  }) async {
+    final db = await _db;
+    await db.insert(
+      'sleep_lab_manual_boundaries',
+      {
+        'session_id': sessionId,
+        'manual_onset_utc': manualOnset?.toUtc().millisecondsSinceEpoch,
+        'manual_end_utc': manualEnd?.toUtc().millisecondsSinceEpoch,
+        'updated_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Recupera i confini manuali impostati per una sessione.
+  Future<Map<String, DateTime?>> getManualSleepBoundaries(String sessionId) async {
+    final db = await _db;
+    final rows = await db.query(
+      'sleep_lab_manual_boundaries',
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      return {'manualOnset': null, 'manualEnd': null};
+    }
+    final row = rows.first;
+    final onsetMs = row['manual_onset_utc'] as int?;
+    final endMs = row['manual_end_utc'] as int?;
+    return {
+      'manualOnset': onsetMs != null ? DateTime.fromMillisecondsSinceEpoch(onsetMs, isUtc: true) : null,
+      'manualEnd': endMs != null ? DateTime.fromMillisecondsSinceEpoch(endMs, isUtc: true) : null,
+    };
   }
 
   /// Chiude la connessione al database sottostante.

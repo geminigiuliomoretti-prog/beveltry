@@ -38,6 +38,7 @@ class WhoopDatabase {
       version: databaseVersion,
       onConfigure: _onConfigure,
       onCreate: _onCreate,
+      onOpen: _onOpen,
     );
   }
 
@@ -213,6 +214,47 @@ class WhoopDatabase {
     await db.execute('''
       CREATE INDEX IF NOT EXISTS idx_night_events_sess 
       ON night_events(session_id, timestamp_utc);
+    ''');
+
+    await _createSleepLabTables(db);
+  }
+
+  static Future<void> _onOpen(Database db) async {
+    await _createSleepLabTables(db);
+  }
+
+  static Future<void> _createSleepLabTables(Database db) async {
+    // Tabelle dedicate a Beveltry Sleep Lab e Confronto WHOOP A (Task 08A)
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS whoop_a_comparisons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        created_at_utc INTEGER NOT NULL,
+        algorithm_version TEXT NOT NULL,
+        sleep_onset_utc INTEGER,
+        sleep_end_utc INTEGER,
+        sleep_duration_seconds INTEGER,
+        awake_duration_seconds INTEGER,
+        light_duration_seconds INTEGER,
+        deep_duration_seconds INTEGER,
+        rem_duration_seconds INTEGER,
+        hrv_rmssd REAL,
+        rhr_bpm INTEGER,
+        respiratory_rate REAL,
+        recovery_score INTEGER,
+        sleep_performance_score INTEGER,
+        notes TEXT,
+        UNIQUE(session_id) ON CONFLICT REPLACE
+      );
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS sleep_lab_manual_boundaries (
+        session_id TEXT PRIMARY KEY,
+        manual_onset_utc INTEGER,
+        manual_end_utc INTEGER,
+        updated_at_utc INTEGER NOT NULL
+      );
     ''');
   }
 
