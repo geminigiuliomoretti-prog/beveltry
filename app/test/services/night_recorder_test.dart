@@ -10,7 +10,7 @@ import 'package:beveltry/src/services/sync_service.dart';
 void main() {
   setUpAll(() {
     sqfliteFfiInit();
-    databaseFactory = databaseFactoryFfi;
+    databaseFactory = databaseFactoryFfiNoIsolate;
   });
 
   group('Night Recorder Repository & Summary Tests', () {

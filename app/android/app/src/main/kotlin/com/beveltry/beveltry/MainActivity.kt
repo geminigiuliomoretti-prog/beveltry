@@ -207,6 +207,39 @@ class MainActivity : FlutterActivity() {
                     result.success(summary)
                 }
 
+                // Chiamate Always-On Recorder (Task 08C)
+                "setAlwaysOnEnabled" -> {
+                    val enabled = call.argument<Boolean>("enabled") ?: false
+                    val ok = connectionService?.setAlwaysOnEnabled(enabled) ?: false
+                    result.success(ok)
+                }
+
+                "isAlwaysOnEnabled" -> {
+                    val enabled = connectionService?.isAlwaysOnEnabled() ?: false
+                    result.success(enabled)
+                }
+
+                "getAlwaysOnDiagnostics" -> {
+                    val diag = connectionService?.getAlwaysOnDiagnostics() ?: emptyMap<String, Any?>()
+                    result.success(diag)
+                }
+
+                "getRecordingSegments" -> {
+                    val sessionId = call.argument<String>("sessionId")
+                    if (sessionId == null) {
+                        result.error("INVALID_ARG", "sessionId richiesto", null)
+                        return@setMethodCallHandler
+                    }
+                    val segments = connectionService?.storageEngine?.getRecordingSegments(sessionId) ?: emptyList<Map<String, Any?>>()
+                    result.success(segments)
+                }
+
+                "getConnectionEvents" -> {
+                    val limit = call.argument<Int>("limit") ?: 50
+                    val events = connectionService?.storageEngine?.getRecentConnectionEvents(limit) ?: emptyList<Map<String, Any?>>()
+                    result.success(events)
+                }
+
                 else -> result.notImplemented()
             }
         }
@@ -284,6 +317,36 @@ class MainActivity : FlutterActivity() {
                             "timestamp" to live.timestampSeconds,
                         ),
                     )
+                }
+            }
+
+            service.coordinator?.let { coord ->
+                launch {
+                    coord.updatesFlow.collect { upd ->
+                        channel?.invokeMethod(
+                            "onAlwaysOnUpdate",
+                            mapOf(
+                                "stateName" to upd.stateName,
+                                "isAlwaysOn" to upd.isAlwaysOn,
+                                "isManual" to upd.isManual,
+                                "sessionId" to upd.sessionId,
+                                "totalSamples" to upd.totalSamples,
+                                "totalRr" to upd.totalRr,
+                                "lastHr" to upd.lastHr,
+                                "lastRr" to upd.lastRr,
+                                "lastSampleTimeUtc" to upd.lastSampleTimeUtc,
+                                "disconnectionsCount" to upd.disconnectionsCount,
+                                "gapsCount" to upd.gapsCount,
+                                "maxGapMs" to upd.maxGapMs,
+                                "isGattConnected" to upd.isGattConnected,
+                                "isSubscribed" to upd.isSubscribed,
+                                "isStreaming" to upd.isStreaming,
+                                "isPersisting" to upd.isPersisting,
+                                "isStreamStale" to upd.isStreamStale,
+                                "isBluetoothEnabled" to upd.isBluetoothEnabled,
+                            )
+                        )
+                    }
                 }
             }
 

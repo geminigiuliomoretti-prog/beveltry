@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:flutter/services.dart';
 
 import 'ble_connection_state.dart';
@@ -42,6 +43,8 @@ class MethodChannelPuffinTransport implements PuffinTransport {
       StreamController<int>.broadcast();
   final StreamController<Map<String, dynamic>> _nightRecorderUpdateController =
       StreamController<Map<String, dynamic>>.broadcast();
+  final StreamController<Map<String, dynamic>> _alwaysOnUpdateController =
+      StreamController<Map<String, dynamic>>.broadcast();
 
   @override
   Stream<PuffinIncomingFrame> get incomingFrames =>
@@ -67,6 +70,9 @@ class MethodChannelPuffinTransport implements PuffinTransport {
 
   Stream<Map<String, dynamic>> get onNightRecorderUpdate =>
       _nightRecorderUpdateController.stream;
+
+  Stream<Map<String, dynamic>> get onAlwaysOnUpdate =>
+      _alwaysOnUpdateController.stream;
 
   void Function()? _onBondingStartedCallback;
 
@@ -106,6 +112,19 @@ class MethodChannelPuffinTransport implements PuffinTransport {
           if (rrList != null && rrList.isNotEmpty) {
             _liveRrMsController.add(rrList.last);
           }
+          if (hr != null) {
+            final builder = BytesBuilder();
+            final flags = (rrList != null && rrList.isNotEmpty) ? 0x10 : 0x00;
+            builder.addByte(flags);
+            builder.addByte(hr & 0xFF);
+            if (rrList != null) {
+              for (final rr in rrList) {
+                builder.addByte(rr & 0xFF);
+                builder.addByte((rr >> 8) & 0xFF);
+              }
+            }
+            _standardHrController.add(builder.toBytes());
+          }
         }
         break;
 
@@ -144,6 +163,13 @@ class MethodChannelPuffinTransport implements PuffinTransport {
         _nightRecorderUpdateController.add(map);
         final hr = map['lastHrBpm'] as int?;
         if (hr != null && hr > 0) _liveHrBpmController.add(hr);
+        break;
+
+      case 'onAlwaysOnUpdate':
+        final map = Map<String, dynamic>.from(call.arguments as Map);
+        _alwaysOnUpdateController.add(map);
+        final aHr = map['lastHr'] as int?;
+        if (aHr != null && aHr > 0) _liveHrBpmController.add(aHr);
         break;
 
       case 'onFrameReceived':
@@ -304,5 +330,47 @@ class MethodChannelPuffinTransport implements PuffinTransport {
       'sessionId': sessionId,
     });
     return result != null ? Map<String, dynamic>.from(result) : {};
+  }
+
+  // =========================================================================
+  // METODI ALWAYS-ON RECORDER (Task 08C)
+  // =========================================================================
+
+  /// Abilita o disabilita Always-On nel servizio nativo Android.
+  Future<bool> setAlwaysOnEnabled(bool enabled) async {
+    final ok = await _channel.invokeMethod<bool>('setAlwaysOnEnabled', {
+      'enabled': enabled,
+    });
+    return ok == true;
+  }
+
+  /// Verifica se Always-On è attualmente attivo nel runtime nativo.
+  Future<bool> isAlwaysOnEnabled() async {
+    final ok = await _channel.invokeMethod<bool>('isAlwaysOnEnabled');
+    return ok == true;
+  }
+
+  /// Interroga le metriche diagnostiche complete del RecordingCoordinator nativo.
+  Future<Map<String, dynamic>> getAlwaysOnDiagnostics() async {
+    final result = await _channel.invokeMethod<Map>('getAlwaysOnDiagnostics');
+    return result != null ? Map<String, dynamic>.from(result) : {};
+  }
+
+  /// Recupera i segmenti di registrazione per una determinata sessione.
+  Future<List<Map<String, dynamic>>> getRecordingSegments(String sessionId) async {
+    final result = await _channel.invokeListMethod<Map>('getRecordingSegments', {
+      'sessionId': sessionId,
+    });
+    if (result == null) return [];
+    return result.map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
+  /// Recupera gli eventi recenti di connessione (disconnessioni, gap, transizioni).
+  Future<List<Map<String, dynamic>>> getConnectionEvents({int limit = 50}) async {
+    final result = await _channel.invokeListMethod<Map>('getConnectionEvents', {
+      'limit': limit,
+    });
+    if (result == null) return [];
+    return result.map((e) => Map<String, dynamic>.from(e)).toList();
   }
 }

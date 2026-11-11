@@ -54,11 +54,11 @@ sealed class GattOperation(val id: Long, val timeoutMs: Long = 5000L) {
         timeoutMs: Long = 5000L,
     ) : GattOperation(id, timeoutMs) {
         override fun execute(gatt: BluetoothGatt): Boolean {
+            @Suppress("DEPRECATION")
+            descriptor.value = data
             return if (Build.VERSION.SDK_INT >= 33) {
                 gatt.writeDescriptor(descriptor, data) == BluetoothGatt.GATT_SUCCESS
             } else {
-                @Suppress("DEPRECATION")
-                descriptor.value = data
                 @Suppress("DEPRECATION")
                 gatt.writeDescriptor(descriptor)
             }
@@ -262,6 +262,10 @@ class SerializedGattQueue(
             it.completion.complete(GattOpResult.Failure(BluetoothGatt.GATT_FAILURE, reason))
         }
         activeOp = null
+        while (true) {
+            val op = queue.tryReceive().getOrNull() ?: break
+            op.completion.complete(GattOpResult.Failure(BluetoothGatt.GATT_FAILURE, reason))
+        }
     }
 
     companion object {

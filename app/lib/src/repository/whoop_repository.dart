@@ -897,6 +897,177 @@ class WhoopRepository {
   }
 
   /// Chiude la connessione al database sottostante.
+
+  // ==========================================
+  // METODI ALWAYS-ON & DIAGNOSTICA (Task 08C)
+  // ==========================================
+
+  /// Salva una preferenza Always-On in automatic_recording_settings.
+  Future<void> setSetting(String key, String value) async {
+    final db = await _database.database;
+    final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
+    await db.insert(
+      'automatic_recording_settings',
+      {'key': key, 'value': value, 'updated_at_utc': nowMs},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Recupera una preferenza Always-On.
+  Future<String?> getSetting(String key, {String? defaultValue}) async {
+    final db = await _database.database;
+    final rows = await db.query(
+      'automatic_recording_settings',
+      columns: ['value'],
+      where: 'key = ?',
+      whereArgs: [key],
+      limit: 1,
+    );
+    if (rows.isNotEmpty) {
+      return rows.first['value'] as String?;
+    }
+    return defaultValue;
+  }
+
+  /// Verifica se la registrazione automatica Always-On è attiva.
+  Future<bool> isAlwaysOnEnabled() async {
+    final val = await getSetting('always_on_enabled', defaultValue: 'false');
+    return val == 'true';
+  }
+
+  /// Imposta lo stato di Always-On in SQLite.
+  Future<void> setAlwaysOnEnabled(bool enabled) async {
+    await setSetting('always_on_enabled', enabled ? 'true' : 'false');
+  }
+
+  /// Registra un evento di connessione o gap nella tabella connection_events.
+  Future<int> logConnectionEvent({
+    required String eventType,
+    int? reasonCode,
+    String? details,
+    String? sessionId,
+    DateTime? timestamp,
+    int? monotonicMillis,
+  }) async {
+    final db = await _database.database;
+    final now = timestamp ?? DateTime.now().toUtc();
+    final mono = monotonicMillis ?? now.millisecondsSinceEpoch;
+    return db.insert(
+      'connection_events',
+      {
+        'timestamp_utc': now.millisecondsSinceEpoch,
+        'monotonic_millis': mono,
+        'session_id': sessionId,
+        'event_type': eventType,
+        'reason_code': reasonCode,
+        'details': details,
+        'created_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
+      },
+    );
+  }
+
+  /// Restituisce gli eventi di connessione recenti per diagnostica.
+  Future<List<Map<String, dynamic>>> getRecentConnectionEvents({int limit = 50}) async {
+    final db = await _database.database;
+    return db.query(
+      'connection_events',
+      orderBy: 'id DESC',
+      limit: limit,
+    );
+  }
+
+  /// Avvia un segmento di registrazione (apertura/riconnessione).
+  Future<void> startRecordingSegment({
+    required String segmentId,
+    required String sessionId,
+    required DateTime startedAt,
+    required String startReason,
+  }) async {
+    final db = await _database.database;
+    await db.insert(
+      'recording_segments',
+      {
+        'id': segmentId,
+        'session_id': sessionId,
+        'started_at_utc': startedAt.toUtc().millisecondsSinceEpoch,
+        'start_reason': startReason,
+        'hr_count': 0,
+        'rr_count': 0,
+        'max_gap_ms': 0,
+        'created_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Aggiorna le metriche del segmento corrente (durante lo streaming).
+  Future<void> updateRecordingSegmentMetrics({
+    required String segmentId,
+    required int hrCount,
+    required int rrCount,
+    required int maxGapMs,
+  }) async {
+    final db = await _database.database;
+    await db.update(
+      'recording_segments',
+      {
+        'hr_count': hrCount,
+        'rr_count': rrCount,
+        'max_gap_ms': maxGapMs,
+      },
+      where: 'id = ?',
+      whereArgs: [segmentId],
+    );
+  }
+
+  /// Chiude un segmento di registrazione (disconnessione o termine).
+  Future<void> endRecordingSegment({
+    required String segmentId,
+    required DateTime endedAt,
+    required String endReason,
+    required int hrCount,
+    required int rrCount,
+    required int maxGapMs,
+  }) async {
+    final db = await _database.database;
+    await db.update(
+      'recording_segments',
+      {
+        'ended_at_utc': endedAt.toUtc().millisecondsSinceEpoch,
+        'end_reason': endReason,
+        'hr_count': hrCount,
+        'rr_count': rrCount,
+        'max_gap_ms': maxGapMs,
+      },
+      where: 'id = ?',
+      whereArgs: [segmentId],
+    );
+  }
+
+  /// Restituisce tutti i segmenti registrati per una data sessione.
+  Future<List<Map<String, dynamic>>> getRecordingSegments(String sessionId) async {
+    final db = await _database.database;
+    return db.query(
+      'recording_segments',
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+      orderBy: 'started_at_utc ASC',
+    );
+  }
+
+  /// Restituisce l'ultimo evento di disconnessione registrato.
+  Future<Map<String, dynamic>?> getLastDisconnectEvent() async {
+    final db = await _database.database;
+    final rows = await db.query(
+      'connection_events',
+      where: 'event_type LIKE ?',
+      whereArgs: ['%DISCONNECT%'],
+      orderBy: 'id DESC',
+      limit: 1,
+    );
+    return rows.isNotEmpty ? rows.first : null;
+  }
+
   Future<void> close() => _database.close();
 
   static V18Record _mapRowToV18Record(

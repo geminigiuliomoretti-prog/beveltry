@@ -14,8 +14,10 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
@@ -54,6 +56,8 @@ class WhoopConnectionService : Service() {
     lateinit var gattQueue: SerializedGattQueue
         private set
     lateinit var storageEngine: WhoopStorageEngine
+        private set
+    var coordinator: RecordingCoordinator? = null
         private set
     private var syncCoordinator: HistoricalSyncCoordinator? = null
 
@@ -163,6 +167,56 @@ class WhoopConnectionService : Service() {
         fun getService(): WhoopConnectionService = this@WhoopConnectionService
     }
 
+    // ID Generazionale per invalidare callback tardive di vecchie connessioni GATT (Task 08C.2)
+    private val gattSessionGeneration = AtomicInteger(0)
+    @Volatile
+    private var activeCallbackGeneration: Int = 0
+
+    // Receiver dinamico registrato a runtime per intercettare affidabilmente cambi stato Bluetooth (Task 08C.2)
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent?) {
+            if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                when (state) {
+                    BluetoothAdapter.STATE_TURNING_OFF -> {
+                        Log.w(TAG, "Bluetooth STATE_TURNING_OFF: inizio procedura chiusura pulita")
+                        coordinator?.onBluetoothTurningOff()
+                    }
+                    BluetoothAdapter.STATE_OFF -> {
+                        Log.w(TAG, "Bluetooth STATE_OFF: chip disattivato")
+                        handleBluetoothDisabled()
+                    }
+                    BluetoothAdapter.STATE_TURNING_ON -> {
+                        Log.i(TAG, "Bluetooth STATE_TURNING_ON")
+                    }
+                    BluetoothAdapter.STATE_ON -> {
+                        Log.i(TAG, "Bluetooth STATE_ON: chip riattivato")
+                        handleBluetoothEnabled()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun handleBluetoothDisabled() {
+        reconnectJob?.cancel()
+        reconnectJob = null
+        closeGatt()
+        storageEngine.insertConnectionEvent(
+            eventType = "GATT_CLOSED",
+            reasonCode = 0,
+            details = "GATT chiuso e code cancellate per spegnimento Bluetooth"
+        )
+        coordinator?.onBluetoothStateChanged(false)
+        stateMachine.transitionTo(ConnectionState.Failed("Bluetooth disattivato", canRetry = false))
+        updateNotification("Bluetooth disattivato sullo smartphone")
+    }
+
+    private fun handleBluetoothEnabled() {
+        Log.i(TAG, "Ripristino connessione post riattivazione Bluetooth")
+        coordinator?.onBluetoothStateChanged(true)
+    }
+
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "WhoopConnectionService creato")
@@ -177,6 +231,29 @@ class WhoopConnectionService : Service() {
         gattQueue = SerializedGattQueue(gattProvider = { gatt }, scope = scope)
 
         createNotificationChannel()
+
+        coordinator = RecordingCoordinator(
+            context = applicationContext,
+            storageEngine = storageEngine,
+            scope = scope,
+            connectAction = { mac ->
+                scope.launch { initiateConnection(mac) }
+            },
+            disconnectAction = {
+                disconnectDevice()
+            },
+            updateNotificationAction = { title, text ->
+                updateNotification(text, title = title)
+            }
+        )
+
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(bluetoothStateReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(bluetoothStateReceiver, filter)
+        }
+
         startForegroundWithNotification("Inizializzazione servizio BLE...")
     }
 
@@ -193,6 +270,12 @@ class WhoopConnectionService : Service() {
             ACTION_DISCONNECT -> {
                 disconnectDevice()
             }
+            ACTION_ENABLE_ALWAYS_ON -> {
+                coordinator?.setAlwaysOnEnabled(true)
+            }
+            ACTION_DISABLE_ALWAYS_ON -> {
+                coordinator?.setAlwaysOnEnabled(false)
+            }
             ACTION_STOP_SERVICE -> {
                 disconnectDevice()
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -206,6 +289,11 @@ class WhoopConnectionService : Service() {
 
     override fun onDestroy() {
         Log.i(TAG, "WhoopConnectionService onDestroy")
+        try {
+            unregisterReceiver(bluetoothStateReceiver)
+        } catch (e: Exception) {
+            Log.w(TAG, "Errore unregister bluetoothStateReceiver: ${e.message}")
+        }
         disconnectDevice()
         storageEngine.close()
         scope.cancel()
@@ -228,6 +316,7 @@ class WhoopConnectionService : Service() {
     }
 
     private suspend fun initiateConnection(macAddress: String) {
+        targetDeviceAddress = macAddress
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val adapter = bluetoothManager.adapter
         if (adapter == null || !adapter.isEnabled) {
@@ -243,6 +332,8 @@ class WhoopConnectionService : Service() {
         }
 
         closeGatt()
+        val currentGen = gattSessionGeneration.incrementAndGet()
+        activeCallbackGeneration = currentGen
         reassemblers.values.forEach(PuffinFrameReassembler::reset)
         discoveredCharacteristics.clear()
 
@@ -285,6 +376,7 @@ class WhoopConnectionService : Service() {
     }
 
     private fun closeGatt() {
+        gattSessionGeneration.incrementAndGet()
         gattQueue.clear("Chiusura GATT")
         try {
             gatt?.disconnect()
@@ -316,10 +408,20 @@ class WhoopConnectionService : Service() {
     // GATT CALLBACK
 
     private val gattCallback = object : BluetoothGattCallback() {
+        private fun isStale(gatt: BluetoothGatt?): Boolean {
+            if (activeCallbackGeneration != gattSessionGeneration.get() || gatt === null || gatt !== this@WhoopConnectionService.gatt) {
+                Log.w(TAG, "Callback GATT scartata per istanza obsoleta (gen=$activeCallbackGeneration vs current=${gattSessionGeneration.get()})")
+                return true
+            }
+            return false
+        }
+
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (isStale(gatt)) return
             Log.i(TAG, "onConnectionStateChange status=$status newState=$newState")
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.w(TAG, "Connessione terminata con status $status")
+                coordinator?.onGattDisconnected(status, "GATT status $status")
                 if (isNightRecording && activeNightSessionId != null) {
                     nightDisconnectionsCount.incrementAndGet()
                     storageEngine.insertNightEvent(
@@ -342,6 +444,7 @@ class WhoopConnectionService : Service() {
 
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 reconnectAttempt = 0
+                coordinator?.onGattConnected(targetDeviceAddress ?: gatt.device.address)
                 stateMachine.transitionTo(ConnectionState.Discovering)
                 updateNotification("Ricerca servizi GATT...")
                 scope.launch {
@@ -352,6 +455,7 @@ class WhoopConnectionService : Service() {
                     }
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                coordinator?.onGattDisconnected(status, "GATT connection lost")
                 if (isNightRecording && activeNightSessionId != null) {
                     nightDisconnectionsCount.incrementAndGet()
                     storageEngine.insertNightEvent(
@@ -376,6 +480,7 @@ class WhoopConnectionService : Service() {
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (isStale(gatt)) return
             gattQueue.onServicesDiscovered(status)
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.e(TAG, "onServicesDiscovered errore status=$status")
@@ -389,58 +494,85 @@ class WhoopConnectionService : Service() {
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (isStale(gatt)) return
             gattQueue.onCharacteristicWrite(characteristic, status)
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            if (isStale(gatt)) return
             gattQueue.onDescriptorWrite(descriptor, status)
         }
 
         @Suppress("DEPRECATION")
         override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (isStale(gatt)) return
             @Suppress("DEPRECATION")
             val data = characteristic.value ?: ByteArray(0)
             gattQueue.onCharacteristicRead(characteristic, data, status)
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (isStale(gatt)) return
             Log.i(TAG, "onMtuChanged mtu=$mtu status=$status")
             gattQueue.onMtuChanged(mtu, status)
         }
 
         @Suppress("DEPRECATION")
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            if (Build.VERSION.SDK_INT < 33) {
-                val value = characteristic.value ?: return
+            if (isStale(gatt)) return
+            val value = characteristic.value ?: ByteArray(0)
+            if (value.isNotEmpty()) {
                 handleNotification(characteristic.uuid, value)
             }
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
-            if (Build.VERSION.SDK_INT >= 33) {
+            if (isStale(gatt)) return
+            if (value.isNotEmpty()) {
                 handleNotification(characteristic.uuid, value)
             }
         }
     }
 
     private suspend fun setupGattSession(gatt: BluetoothGatt) {
-        val whoopService = gatt.getService(WHOOP_SERVICE_UUID)
-        if (whoopService == null) {
-            Log.e(TAG, "Servizio primario WHOOP non trovato: $WHOOP_SERVICE_UUID")
-            stateMachine.transitionTo(ConnectionState.Failed("Servizio primario WHOOP assente", canRetry = false))
-            return
+        val services = gatt.services
+        val serviceCount = services.size
+        val summary = services.joinToString("; ") { s ->
+            val name = when (s.uuid) {
+                HEART_RATE_SERVICE_UUID -> "HR(0x180D)"
+                WHOOP_SERVICE_UUID -> "WHOOP_PRI(0xFD4B)"
+                else -> s.uuid.toString().substring(0, 8)
+            }
+            "$name[${s.characteristics.size}]"
+        }
+        coordinator?.onServicesDiscovered(serviceCount, summary)
+        logDiagnostic("Services discovered: $summary")
+
+        // Indicizza TUTTE le caratteristiche di TUTTI i servizi disponibili
+        for (service in services) {
+            for (ch in service.characteristics) {
+                discoveredCharacteristics[ch.uuid] = ch
+            }
         }
 
-        for (ch in whoopService.characteristics) {
-            discoveredCharacteristics[ch.uuid] = ch
-        }
+        // =========================================================================
+        // PRIORITÀ ASSOLUTA (TASK 08C.1): Sottoscrizione immediata a Heart Rate 0x2A37
+        // =========================================================================
+        val hrChar = discoveredCharacteristics[HEART_RATE_MEASUREMENT_UUID]
+            ?: gatt.getService(HEART_RATE_SERVICE_UUID)?.getCharacteristic(HEART_RATE_MEASUREMENT_UUID)
 
-        val hrService = gatt.getService(HEART_RATE_SERVICE_UUID)
-        hrService?.getCharacteristic(HEART_RATE_MEASUREMENT_UUID)?.let {
-            discoveredCharacteristics[it.uuid] = it
+        if (hrChar != null) {
+            discoveredCharacteristics[HEART_RATE_MEASUREMENT_UUID] = hrChar
+            coordinator?.onHrCharacteristicFound(hrChar.properties)
+            coordinator?.onCccdWriteStarted()
+            val hrSubOk = enableNotificationSerialized(gatt, hrChar)
+            logDiagnostic("Sottoscrizione 0x2A37 immediata: ok=$hrSubOk")
+            coordinator?.onHrSubscribed(if (hrSubOk) 0 else -1)
+        } else {
+            Log.e(TAG, "Caratteristica standard Heart Rate 0x2A37 non trovata nei servizi GATT!")
+            logDiagnostic("Caratteristica Heart Rate 0x2A37 non trovata!")
+            coordinator?.onHrSubscribed(status = 133)
         }
-
-        logDiagnostic("Services discovered: ${gatt.services.map { it.uuid }}")
 
         // 1. Negozia MTU a 247 (come osservato nella cattura btsnoop_hci)
         stateMachine.transitionTo(ConnectionState.NegotiatingMtu)
@@ -448,19 +580,18 @@ class WhoopConnectionService : Service() {
         logDiagnostic("MTU negoziato: $mtuRes")
         Log.i(TAG, "MTU negoziato: $mtuRes")
 
-        // 2. Abilita sottoscrizioni CCCD in sequenza rigorosa (Serialized Queue)
-        val subUuids = listOf(
+        // 2. Abilita sottoscrizioni CCCD secondarie Puffin se presenti
+        val puffinSubUuids = listOf(
             CMD_FROM_STRAP_UUID,
             EVENTS_FROM_STRAP_UUID,
             DATA_FROM_STRAP_UUID,
             MEMFAULT_UUID,
-            HEART_RATE_MEASUREMENT_UUID,
         )
 
         var step = 0
-        for (uuid in subUuids) {
+        for (uuid in puffinSubUuids) {
             step++
-            stateMachine.transitionTo(ConnectionState.Subscribing(step, subUuids.size))
+            stateMachine.transitionTo(ConnectionState.Subscribing(step, puffinSubUuids.size))
             val ch = discoveredCharacteristics[uuid]
             if (ch != null) {
                 val ok = enableNotificationSerialized(gatt, ch)
@@ -631,50 +762,35 @@ class WhoopConnectionService : Service() {
     private fun handleNotification(uuid: UUID, value: ByteArray) {
         if (uuid == HEART_RATE_MEASUREMENT_UUID) {
             try {
+                val hexPreview = value.take(8).joinToString(" ") { "%02X".format(it) }
+                coordinator?.onHrNotificationReceived(value.size, hexPreview)
+
                 val hr = PuffinProtocolDecoder.decodeStandardHr(value)
+                coordinator?.onHrSampleDecoded(hr.hr, hr.rawRrIntervals.size)
+
                 _realtimeHrFlow.tryEmit(hr)
 
-                if (isNightRecording && activeNightSessionId != null) {
-                    val nowUtc = System.currentTimeMillis()
-                    val monoMs = System.nanoTime() / 1_000_000L
-                    val flags = if (value.isNotEmpty()) value[0].toInt() and 0xFF else 0
-                    val sensorContact = hr.sensorContactDetected?.let { if (it) 1 else 0 } ?: -1
-                    val rrStatus = if (hr.rawRrIntervals.isNotEmpty()) "AVAILABLE" else "RR_UNAVAILABLE"
-                    val sessId = activeNightSessionId!!
+                val flags = if (value.isNotEmpty()) value[0].toInt() and 0xFF else 0
+                val sensorContact = hr.sensorContactDetected?.let { if (it) 1 else 0 } ?: -1
 
-                    val sampleId = storageEngine.insertNightSample(
-                        sessionId = sessId,
-                        timestampUtc = nowUtc,
-                        monotonicMillis = monoMs,
-                        hrBpm = hr.hr,
-                        flags = flags,
-                        sensorContact = sensorContact,
-                        rrStatus = rrStatus,
-                        origin = "GATT_0x2A37",
-                        connState = "CONNECTED",
-                    )
+                // =========================================================================
+                // INOLTRO UNICO E DIRETTO AL RECORDING COORDINATOR (TASK 08C.1 FIX BLOCCANTE)
+                // =========================================================================
+                coordinator?.onHrSampleReceived(
+                    hrBpm = hr.hr,
+                    rawRrIntervals = hr.rawRrIntervals,
+                    flags = flags,
+                    sensorContact = sensorContact,
+                    origin = "GATT_0x2A37"
+                )
 
-                    for ((idx, rawRr) in hr.rawRrIntervals.withIndex()) {
-                        val rrMsDirect = rawRr
-                        val rrMs1024 = rawRr * 1000.0 / 1024.0
-                        storageEngine.insertNightRr(
-                            sampleId = sampleId,
-                            sessionId = sessId,
-                            timestampUtc = nowUtc,
-                            beatOrdinal = idx,
-                            rrRaw = rawRr,
-                            rrMsDirect = rrMsDirect,
-                            rrMs1024 = rrMs1024,
-                        )
-                    }
-
+                if (isNightRecording) {
                     nightSamplesCount.incrementAndGet()
                     if (hr.rawRrIntervals.isNotEmpty()) {
                         nightRrCount.addAndGet(hr.rawRrIntervals.size)
                     }
-                    nightLastSampleTimeMs = nowUtc
+                    nightLastSampleTimeMs = System.currentTimeMillis()
 
-                    // Aggiorna notifica periodica (almeno ogni 1s per non sovraccaricare il notification manager)
                     val now = System.currentTimeMillis()
                     if (now - lastNotificationUpdateMs >= 1000L) {
                         lastNotificationUpdateMs = now
@@ -813,11 +929,27 @@ class WhoopConnectionService : Service() {
         nightStartTimeMs = System.currentTimeMillis()
         nightLastSampleTimeMs = 0L
 
-        val started = storageEngine.startNightSession(sessionId, address, name, nightStartTimeMs)
+        val started = coordinator?.startManualRecording(sessionId) ?: storageEngine.startNightSession(sessionId, address, name, nightStartTimeMs)
         logDiagnostic("Night Recording avviata: session=$sessionId, device=$address ($name), db_ok=$started")
         updateNotification("Night Recorder ATTIVO: In attesa primo battito...")
         emitNightRecorderStatus(lastHr = null)
         return started
+    }
+
+    fun setAlwaysOnEnabled(enabled: Boolean): Boolean {
+        val ok = coordinator?.setAlwaysOnEnabled(enabled) ?: false
+        if (enabled) {
+            WhoopMaintenanceWorker.schedulePeriodic(applicationContext)
+        }
+        return ok
+    }
+
+    fun isAlwaysOnEnabled(): Boolean {
+        return coordinator?.isAlwaysOnEnabled ?: false
+    }
+
+    fun getAlwaysOnDiagnostics(): Map<String, Any?> {
+        return coordinator?.getDiagnostics() ?: emptyMap()
     }
 
     fun stopNightRecording(): Map<String, Any?> {
@@ -893,7 +1025,7 @@ class WhoopConnectionService : Service() {
         }
     }
 
-    private fun buildNotification(contentText: String): Notification {
+    private fun buildNotification(contentText: String, contentTitle: String? = null): Notification {
         val intent = packageManager.getLaunchIntentForPackage(packageName)
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -902,6 +1034,22 @@ class WhoopConnectionService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
+        val disableIntent = Intent(this, WhoopConnectionService::class.java).apply {
+            action = ACTION_DISABLE_ALWAYS_ON
+        }
+        val disablePendingIntent = PendingIntent.getService(
+            this,
+            1,
+            disableIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val title = contentTitle ?: if (coordinator?.isAlwaysOnEnabled == true) {
+            "Beveltry — Registrazione WHOOP attiva"
+        } else {
+            "WHOOP 5.0 — Beveltry"
+        }
+
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
         } else {
@@ -909,17 +1057,27 @@ class WhoopConnectionService : Service() {
             Notification.Builder(this)
         }
 
-        return builder
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setContentTitle("WHOOP 5.0 — Beveltry")
+        builder.setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setContentTitle(title)
             .setContentText(contentText)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
-            .build()
+
+        if (coordinator?.isAlwaysOnEnabled == true) {
+            builder.addAction(
+                Notification.Action.Builder(
+                    null,
+                    "Disattiva Always-On",
+                    disablePendingIntent
+                ).build()
+            )
+        }
+
+        return builder.build()
     }
 
-    private fun startForegroundWithNotification(text: String) {
-        val notification = buildNotification(text)
+    private fun startForegroundWithNotification(text: String, title: String? = null) {
+        val notification = buildNotification(text, title)
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(
                 NOTIFICATION_ID,
@@ -931,9 +1089,9 @@ class WhoopConnectionService : Service() {
         }
     }
 
-    private fun updateNotification(text: String) {
+    fun updateNotification(text: String, title: String? = null) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-        manager?.notify(NOTIFICATION_ID, buildNotification(text))
+        manager?.notify(NOTIFICATION_ID, buildNotification(text, title))
     }
 
     companion object {
@@ -944,6 +1102,8 @@ class WhoopConnectionService : Service() {
         const val ACTION_CONNECT = "com.beveltry.ble.action.CONNECT"
         const val ACTION_DISCONNECT = "com.beveltry.ble.action.DISCONNECT"
         const val ACTION_STOP_SERVICE = "com.beveltry.ble.action.STOP"
+        const val ACTION_ENABLE_ALWAYS_ON = "com.beveltry.ble.action.ENABLE_ALWAYS_ON"
+        const val ACTION_DISABLE_ALWAYS_ON = "com.beveltry.ble.action.DISABLE_ALWAYS_ON"
 
         const val EXTRA_MAC_ADDRESS = "extra_mac_address"
         const val EXTRA_DEVICE_NAME = "extra_device_name"

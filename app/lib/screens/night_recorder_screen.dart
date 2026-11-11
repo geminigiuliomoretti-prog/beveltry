@@ -45,6 +45,7 @@ class _NightRecorderScreenState extends State<NightRecorderScreen> {
   Timer? _tickTimer;
   StreamSubscription? _recorderSub;
   StreamSubscription? _standardHrSub;
+  StreamSubscription? _alwaysOnSub;
 
   @override
   void initState() {
@@ -59,6 +60,7 @@ class _NightRecorderScreenState extends State<NightRecorderScreen> {
     _tickTimer?.cancel();
     _recorderSub?.cancel();
     _standardHrSub?.cancel();
+    _alwaysOnSub?.cancel();
     widget.syncService.liveHrNotifier.removeListener(_onLiveHrChanged);
     widget.syncService.connectionStateNotifier.removeListener(_onConnChanged);
     super.dispose();
@@ -126,6 +128,25 @@ class _NightRecorderScreenState extends State<NightRecorderScreen> {
           if (hr != null && hr > 0) {
             _lastHr = hr;
             _lastHrTimestamp = DateTime.now();
+          }
+        });
+      });
+
+      _alwaysOnSub = transport.onAlwaysOnUpdate.listen((map) {
+        if (!mounted) return;
+        final hr = map['lastHr'] as int?;
+        final samples = map['totalSamples'] as int? ?? _samplesCount;
+        final rrs = map['totalRr'] as int? ?? _rrCount;
+        final disc = map['disconnectionsCount'] as int? ?? _disconnectionsCount;
+        setState(() {
+          if (hr != null && hr > 0) {
+            _lastHr = hr;
+            _lastHrTimestamp = DateTime.now();
+          }
+          if (_isRecording) {
+            _samplesCount = samples;
+            _rrCount = rrs;
+            _disconnectionsCount = disc;
           }
         });
       });
@@ -243,6 +264,46 @@ class _NightRecorderScreenState extends State<NightRecorderScreen> {
     final transport = widget.syncService.transport;
 
     try {
+      final alwaysOn = await widget.repository.isAlwaysOnEnabled();
+      if (alwaysOn && mounted) {
+        final shouldDisable = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Registrazione Always-On Attiva'),
+            content: const Text(
+              'La registrazione automatica Always-On è attualmente attiva in background.\n\n'
+              'Vuoi generare il report mantenendo Always-On attivo (consigliato), '
+              'oppure interrompere la sessione e disattivare anche Always-On?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Mantieni Always-On (Solo Report)'),
+              ),
+              TextButton(
+                style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Disattiva Always-On'),
+              ),
+            ],
+          ),
+        );
+
+        if (shouldDisable == null) {
+          setState(() {
+            _isAnalyzing = false;
+          });
+          return;
+        }
+
+        if (shouldDisable) {
+          await widget.repository.setAlwaysOnEnabled(false);
+          if (transport is MethodChannelPuffinTransport) {
+            await transport.setAlwaysOnEnabled(false);
+          }
+        }
+      }
+
       if (transport is MethodChannelPuffinTransport) {
         await transport.stopNightRecording();
       } else {

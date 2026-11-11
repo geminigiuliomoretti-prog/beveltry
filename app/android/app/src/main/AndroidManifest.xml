@@ -8,7 +8,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+    <uses-feature android:name="android.software.companion_device_setup" android:required="false" />
 
     <application
         android:label="Beveltry"
@@ -37,6 +40,25 @@
             android:name="com.beveltry.ble.WhoopConnectionService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <service
+            android:name="com.beveltry.ble.WhoopCompanionService"
+            android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.companion.CompanionDeviceService" />
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name="com.beveltry.ble.BootAndBleReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.bluetooth.adapter.action.STATE_CHANGED" />
+            </intent-filter>
+        </receiver>
 
         <meta-data
             android:name="flutterEmbedding"

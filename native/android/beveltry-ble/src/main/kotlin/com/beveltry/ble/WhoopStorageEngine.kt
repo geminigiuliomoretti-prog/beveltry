@@ -204,6 +204,63 @@ class WhoopStorageEngine(
             CREATE INDEX IF NOT EXISTS idx_night_events_sess 
             ON night_events(session_id, timestamp_utc);
         """.trimIndent())
+
+        // Tabelle dedicate ad Always-On e diagnostica di connessione (Task 08C)
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS automatic_recording_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at_utc INTEGER NOT NULL
+            );
+        """.trimIndent())
+
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS connection_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_utc INTEGER NOT NULL,
+                monotonic_millis INTEGER NOT NULL,
+                session_id TEXT,
+                event_type TEXT NOT NULL,
+                reason_code INTEGER,
+                details TEXT,
+                created_at_utc INTEGER NOT NULL
+            );
+        """.trimIndent())
+
+        db.execSQL("""
+            CREATE INDEX IF NOT EXISTS idx_conn_events_ts 
+            ON connection_events(timestamp_utc);
+        """.trimIndent())
+
+        db.execSQL("""
+            CREATE INDEX IF NOT EXISTS idx_conn_events_sess 
+            ON connection_events(session_id);
+        """.trimIndent())
+
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS recording_segments (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                started_at_utc INTEGER NOT NULL,
+                ended_at_utc INTEGER,
+                start_reason TEXT NOT NULL,
+                end_reason TEXT,
+                hr_count INTEGER NOT NULL DEFAULT 0,
+                rr_count INTEGER NOT NULL DEFAULT 0,
+                max_gap_ms INTEGER NOT NULL DEFAULT 0,
+                created_at_utc INTEGER NOT NULL
+            );
+        """.trimIndent())
+
+        db.execSQL("""
+            CREATE INDEX IF NOT EXISTS idx_rec_segments_sess 
+            ON recording_segments(session_id);
+        """.trimIndent())
+
+        db.execSQL("""
+            CREATE INDEX IF NOT EXISTS idx_rec_segments_start 
+            ON recording_segments(started_at_utc);
+        """.trimIndent())
     }
 
     private fun getDb(): SQLiteDatabase {
@@ -571,6 +628,180 @@ class WhoopStorageEngine(
         }
 
         return result
+    }
+
+
+    // ==========================================
+    // METODI ALWAYS-ON & DIAGNOSTICA (Task 08C)
+    // ==========================================
+
+    fun setSetting(key: String, value: String, updatedAtUtc: Long = System.currentTimeMillis()) {
+        val db = getDb()
+        val cv = ContentValues().apply {
+            put("key", key)
+            put("value", value)
+            put("updated_at_utc", updatedAtUtc)
+        }
+        db.insertWithOnConflict("automatic_recording_settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun getSetting(key: String, defaultValue: String? = null): String? {
+        val db = getDb()
+        db.rawQuery(
+            "SELECT value FROM automatic_recording_settings WHERE key = ?",
+            arrayOf(key)
+        ).use { c ->
+            if (c.moveToFirst()) {
+                return c.getString(0)
+            }
+        }
+        return defaultValue
+    }
+
+    fun isAlwaysOnEnabled(): Boolean {
+        return getSetting("always_on_enabled", "false") == "true"
+    }
+
+    fun setAlwaysOnEnabled(enabled: Boolean) {
+        setSetting("always_on_enabled", if (enabled) "true" else "false")
+    }
+
+    fun insertConnectionEvent(
+        eventType: String,
+        reasonCode: Int? = null,
+        details: String? = null,
+        sessionId: String? = null,
+        timestampUtc: Long = System.currentTimeMillis(),
+        monotonicMillis: Long = System.nanoTime() / 1_000_000L,
+    ): Long {
+        val db = getDb()
+        val cv = ContentValues().apply {
+            put("timestamp_utc", timestampUtc)
+            put("monotonic_millis", monotonicMillis)
+            put("session_id", sessionId)
+            put("event_type", eventType)
+            put("reason_code", reasonCode)
+            put("details", details)
+            put("created_at_utc", System.currentTimeMillis())
+        }
+        return db.insert("connection_events", null, cv)
+    }
+
+    fun startRecordingSegment(
+        segmentId: String,
+        sessionId: String,
+        startedAtUtc: Long,
+        startReason: String,
+    ): Boolean {
+        val db = getDb()
+        val cv = ContentValues().apply {
+            put("id", segmentId)
+            put("session_id", sessionId)
+            put("started_at_utc", startedAtUtc)
+            put("start_reason", startReason)
+            put("hr_count", 0)
+            put("rr_count", 0)
+            put("max_gap_ms", 0)
+            put("created_at_utc", System.currentTimeMillis())
+        }
+        return db.insertWithOnConflict("recording_segments", null, cv, SQLiteDatabase.CONFLICT_REPLACE) != -1L
+    }
+
+    fun updateRecordingSegmentMetrics(
+        segmentId: String,
+        hrCount: Int,
+        rrCount: Int,
+        maxGapMs: Long,
+    ): Boolean {
+        val db = getDb()
+        val cv = ContentValues().apply {
+            put("hr_count", hrCount)
+            put("rr_count", rrCount)
+            put("max_gap_ms", maxGapMs)
+        }
+        return db.update("recording_segments", cv, "id = ?", arrayOf(segmentId)) > 0
+    }
+
+    fun endRecordingSegment(
+        segmentId: String,
+        endedAtUtc: Long,
+        endReason: String,
+        hrCount: Int,
+        rrCount: Int,
+        maxGapMs: Long,
+    ): Boolean {
+        val db = getDb()
+        val cv = ContentValues().apply {
+            put("ended_at_utc", endedAtUtc)
+            put("end_reason", endReason)
+            put("hr_count", hrCount)
+            put("rr_count", rrCount)
+            put("max_gap_ms", maxGapMs)
+        }
+        return db.update("recording_segments", cv, "id = ?", arrayOf(segmentId)) > 0
+    }
+
+    fun getRecentConnectionEvents(limit: Int = 50): List<Map<String, Any?>> {
+        val db = getDb()
+        val list = mutableListOf<Map<String, Any?>>()
+        db.rawQuery(
+            "SELECT id, timestamp_utc, monotonic_millis, session_id, event_type, reason_code, details FROM connection_events ORDER BY id DESC LIMIT ?",
+            arrayOf(limit.toString())
+        ).use { c ->
+            while (c.moveToNext()) {
+                list.add(mapOf(
+                    "id" to c.getLong(0),
+                    "timestampUtc" to c.getLong(1),
+                    "monotonicMillis" to c.getLong(2),
+                    "sessionId" to if (c.isNull(3)) null else c.getString(3),
+                    "eventType" to c.getString(4),
+                    "reasonCode" to if (c.isNull(5)) null else c.getInt(5),
+                    "details" to if (c.isNull(6)) null else c.getString(6),
+                ))
+            }
+        }
+        return list
+    }
+
+    fun getRecordingSegments(sessionId: String): List<Map<String, Any?>> {
+        val db = getDb()
+        val list = mutableListOf<Map<String, Any?>>()
+        db.rawQuery(
+            "SELECT id, session_id, started_at_utc, ended_at_utc, start_reason, end_reason, hr_count, rr_count, max_gap_ms FROM recording_segments WHERE session_id = ? ORDER BY started_at_utc ASC",
+            arrayOf(sessionId)
+        ).use { c ->
+            while (c.moveToNext()) {
+                list.add(mapOf(
+                    "id" to c.getString(0),
+                    "sessionId" to c.getString(1),
+                    "startedAtUtc" to c.getLong(2),
+                    "endedAtUtc" to if (c.isNull(3)) null else c.getLong(3),
+                    "startReason" to c.getString(4),
+                    "endReason" to if (c.isNull(5)) null else c.getString(5),
+                    "hrCount" to c.getInt(6),
+                    "rrCount" to c.getInt(7),
+                    "maxGapMs" to c.getLong(8),
+                ))
+            }
+        }
+        return list
+    }
+
+    fun getLastDisconnectEvent(): Map<String, Any?>? {
+        val db = getDb()
+        db.rawQuery(
+            "SELECT timestamp_utc, reason_code, details FROM connection_events WHERE event_type LIKE '%DISCONNECT%' ORDER BY id DESC LIMIT 1",
+            null
+        ).use { c ->
+            if (c.moveToFirst()) {
+                return mapOf(
+                    "timestampUtc" to c.getLong(0),
+                    "reasonCode" to if (c.isNull(1)) null else c.getInt(1),
+                    "details" to if (c.isNull(2)) null else c.getString(2),
+                )
+            }
+        }
+        return null
     }
 
     companion object {

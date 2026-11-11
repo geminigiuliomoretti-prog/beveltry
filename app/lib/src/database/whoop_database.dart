@@ -217,10 +217,71 @@ class WhoopDatabase {
     ''');
 
     await _createSleepLabTables(db);
+    await _createAlwaysOnTables(db);
   }
 
   static Future<void> _onOpen(Database db) async {
     await _createSleepLabTables(db);
+    await _createAlwaysOnTables(db);
+  }
+
+  static Future<void> _createAlwaysOnTables(Database db) async {
+    // Tabelle dedicate ad Always-On e diagnostica di connessione (Task 08C)
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS automatic_recording_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at_utc INTEGER NOT NULL
+      );
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS connection_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp_utc INTEGER NOT NULL,
+        monotonic_millis INTEGER NOT NULL,
+        session_id TEXT,
+        event_type TEXT NOT NULL,
+        reason_code INTEGER,
+        details TEXT,
+        created_at_utc INTEGER NOT NULL
+      );
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_conn_events_ts 
+      ON connection_events(timestamp_utc);
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_conn_events_sess 
+      ON connection_events(session_id);
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS recording_segments (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        started_at_utc INTEGER NOT NULL,
+        ended_at_utc INTEGER,
+        start_reason TEXT NOT NULL,
+        end_reason TEXT,
+        hr_count INTEGER NOT NULL DEFAULT 0,
+        rr_count INTEGER NOT NULL DEFAULT 0,
+        max_gap_ms INTEGER NOT NULL DEFAULT 0,
+        created_at_utc INTEGER NOT NULL
+      );
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_rec_segments_sess 
+      ON recording_segments(session_id);
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_rec_segments_start 
+      ON recording_segments(started_at_utc);
+    ''');
   }
 
   static Future<void> _createSleepLabTables(Database db) async {

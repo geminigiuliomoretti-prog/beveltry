@@ -74,14 +74,21 @@ logs/*.log
 logs/*.csv
 logs/*.jsonl
 logs/*.json
+*.btsnoop
+*.pcap
+*.pcapng
+*.snoop
+*.log
 !logs/.gitkeep
 exports/*
 !exports/.gitkeep
 
-# SQLite temporary sidecars; keep the existing database
+# SQLite databases and temporary sidecars
 *.db-wal
 *.db-shm
 *.db-journal
+*.sqlite
+*.sqlite3
 
 # Editors and operating systems
 .vscode/

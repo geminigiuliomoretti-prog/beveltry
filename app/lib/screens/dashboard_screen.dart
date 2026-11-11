@@ -5,6 +5,7 @@ import 'package:beveltry/src/repository/whoop_repository.dart';
 import 'package:beveltry/src/services/metrics_service.dart';
 import 'package:beveltry/src/services/sync_service.dart';
 
+import 'always_on_screen.dart';
 import 'night_recorder_screen.dart';
 import 'sleep_lab_screen.dart';
 
@@ -244,6 +245,21 @@ class DashboardScreenState extends State<DashboardScreen> {
             },
           ),
           IconButton(
+            key: const Key('always_on_appbar_button'),
+            tooltip: 'Registrazione automatica Always-On',
+            icon: const Icon(Icons.all_inclusive, color: Colors.greenAccent),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (context) => AlwaysOnScreen(
+                    repository: _repository,
+                    syncService: _syncService,
+                  ),
+                ),
+              );
+            },
+          ),
+          IconButton(
             tooltip: 'Night Recorder',
             icon: const Icon(Icons.nightlight_round, color: Colors.tealAccent),
             onPressed: () {
@@ -265,6 +281,52 @@ class DashboardScreenState extends State<DashboardScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // Banner Accesso Rapido Always-On (Task 08C)
+              InkWell(
+                key: const Key('always_on_entry_button'),
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (context) => AlwaysOnScreen(
+                        repository: _repository,
+                        syncService: _syncService,
+                      ),
+                    ),
+                  );
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  margin: const EdgeInsets.only(bottom: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0F241C),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.greenAccent.withValues(alpha: 0.5)),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.all_inclusive, color: Colors.greenAccent, size: 22),
+                      SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'REGISTRAZIONE AUTOMATICA (ALWAYS-ON)',
+                              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.greenAccent),
+                            ),
+                            Text(
+                              'Acquisizione continua senza premere Start | Gestione disconnessioni e gap',
+                              style: TextStyle(fontSize: 11, color: Colors.white70),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(Icons.arrow_forward_ios, size: 14, color: Colors.greenAccent),
+                    ],
+                  ),
+                ),
+              ),
+
               // Banner Accesso Rapido Night Recorder (Task 07)
               InkWell(
                 key: const Key('night_recorder_entry_button'),
