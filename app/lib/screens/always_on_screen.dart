@@ -34,6 +34,7 @@ class _AlwaysOnScreenState extends State<AlwaysOnScreen> with SingleTickerProvid
   bool _isPersisting = false;
   bool _isStreamStale = false;
   bool _isBluetoothEnabled = true;
+  String _sleepState = 'NO_NIGHT';
 
   int? _lastHrBpm;
   int? _lastRrMs;
@@ -83,6 +84,7 @@ class _AlwaysOnScreenState extends State<AlwaysOnScreen> with SingleTickerProvid
           _isPersisting = map['isPersisting'] as bool? ?? (_totalSamples > 0);
           _isStreamStale = map['isStreamStale'] as bool? ?? _isStreamStale;
           _isBluetoothEnabled = map['isBluetoothEnabled'] as bool? ?? _isBluetoothEnabled;
+          _sleepState = map['sleepState'] as String? ?? _sleepState;
         });
       });
     }
@@ -140,6 +142,7 @@ class _AlwaysOnScreenState extends State<AlwaysOnScreen> with SingleTickerProvid
             _isPersisting = diag['isPersisting'] as bool? ?? (_totalSamples > 0);
             _isStreamStale = diag['isStreamStale'] as bool? ?? _isStreamStale;
             _isBluetoothEnabled = diag['isBluetoothEnabled'] as bool? ?? _isBluetoothEnabled;
+            _sleepState = diag['sleepState'] as String? ?? _sleepState;
             _totalSamples = diag['totalSamples'] as int? ?? _totalSamples;
             _totalRr = diag['totalRr'] as int? ?? _totalRr;
             _lastHrBpm = diag['lastHrBpm'] as int? ?? _lastHrBpm;
@@ -359,6 +362,15 @@ class _AlwaysOnScreenState extends State<AlwaysOnScreen> with SingleTickerProvid
                       : (_isStreamStale ? 'PERSISTENZA IN PAUSA (Stale)' : 'IN ATTESA DATI'),
                   color: (_isPersisting && !_isStreamStale) ? Colors.green : Colors.grey,
                   icon: Icons.save,
+                ),
+                const SizedBox(height: 8),
+                _buildStatusRow(
+                  label: 'Rilevatore Sonno (Task 08D):',
+                  value: _sleepState,
+                  color: _sleepState == 'REPORT_READY' || _sleepState == 'SLEEP_ACTIVE'
+                      ? Colors.purpleAccent
+                      : (_sleepState == 'PROCESS_FAILED' ? Colors.redAccent : Colors.tealAccent),
+                  icon: Icons.nightlight_round,
                 ),
                 const Divider(height: 20),
                 Row(

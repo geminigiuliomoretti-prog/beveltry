@@ -317,6 +317,65 @@ class WhoopDatabase {
         updated_at_utc INTEGER NOT NULL
       );
     ''');
+
+    // Tabelle dedicate ad Automatic Sleep Detection e Morning Report (Task 08D)
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS night_processing (
+        night_key TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        candidate_onset INTEGER,
+        candidate_offset INTEGER,
+        last_processed_at INTEGER,
+        algorithm_version TEXT NOT NULL,
+        error_code TEXT,
+        confidence REAL,
+        decision_reason TEXT,
+        updated_at_utc INTEGER NOT NULL
+      );
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_night_proc_sess 
+      ON night_processing(session_id);
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS sleep_lab_analyses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        night_key TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        state TEXT NOT NULL,
+        algorithm_version TEXT NOT NULL,
+        sleep_onset_utc INTEGER,
+        sleep_end_utc INTEGER,
+        tst_seconds INTEGER NOT NULL,
+        waso_seconds INTEGER NOT NULL,
+        sleep_efficiency REAL NOT NULL,
+        hrv_rmssd_ms REAL,
+        hrv_rolling_median_ms REAL,
+        rhr_bpm INTEGER,
+        respiration_rate REAL,
+        respiration_snr REAL,
+        usable_epochs_count INTEGER NOT NULL,
+        total_epochs_count INTEGER NOT NULL,
+        coverage_percent REAL NOT NULL,
+        gaps_count INTEGER NOT NULL,
+        max_gap_seconds REAL NOT NULL,
+        quality_flags TEXT,
+        classification_label TEXT NOT NULL DEFAULT 'EXPERIMENTAL_CARDIAC_ONLY',
+        analysis_json TEXT,
+        error_message TEXT,
+        created_at_utc INTEGER NOT NULL,
+        UNIQUE(night_key, revision)
+      );
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_sleep_analyses_key 
+      ON sleep_lab_analyses(night_key);
+    ''');
   }
 
   /// Chiude la connessione al database se aperta.

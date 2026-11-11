@@ -106,6 +106,9 @@ class RecordingCoordinator(
     var wasReconnected: Boolean = false
         private set
 
+    var automaticSleepDetector: AutomaticSleepDetector? = null
+        private set
+
     private var lastNotificationMonotonicMs: Long = 0L
     private var freshnessWatchdogJob: Job? = null
     private var connectingTimeoutJob: Job? = null
@@ -134,6 +137,9 @@ class RecordingCoordinator(
         val isPersisting: Boolean = false,
         val isStreamStale: Boolean = false,
         val isBluetoothEnabled: Boolean = true,
+        val sleepState: String = "NO_NIGHT",
+        val candidateOnset: Long? = null,
+        val candidateOffset: Long? = null,
     )
 
     private val _updatesFlow = MutableSharedFlow<CoordinatorUpdate>(extraBufferCapacity = 64)
@@ -406,6 +412,7 @@ class RecordingCoordinator(
             if (lastSampleTimestampUtc > 0L) {
                 val gapDelta = nowUtc - lastSampleTimestampUtc
                 if (gapDelta > 2500L) {
+                    automaticSleepDetector?.onBluetoothGap(gapDelta)
                     gapsDetectedCount.incrementAndGet()
                     if (gapDelta > maxGapMs.get()) {
                         maxGapMs.set(gapDelta)
@@ -494,6 +501,9 @@ class RecordingCoordinator(
 
             lastHrBpm = hrBpm
             lastSampleTimestampUtc = nowUtc
+
+            // TASK 08D: Rilevamento automatico del sonno continuo
+            automaticSleepDetector?.onSampleReceived(nowUtc, hrBpm)
 
             // Se non ancora in STREAMING, questa notifica sancisce il passaggio ufficiale a STREAMING!
             if (currentState !is BleState.Streaming) {
@@ -839,6 +849,12 @@ class RecordingCoordinator(
                 details = "Nuova sessione logica: $sessId (motivo: $reason)",
                 sessionId = sessId
             )
+            automaticSleepDetector = AutomaticSleepDetector(
+                context = context,
+                storageEngine = storageEngine,
+                nightKey = sessId,
+                sessionId = sessId
+            )
         }
     }
 
@@ -916,6 +932,9 @@ class RecordingCoordinator(
             isPersisting = isPersisting,
             isStreamStale = isStreamStale,
             isBluetoothEnabled = isBluetoothEnabled,
+            sleepState = automaticSleepDetector?.currentState?.name ?: "NO_NIGHT",
+            candidateOnset = automaticSleepDetector?.candidateOnsetUtc,
+            candidateOffset = automaticSleepDetector?.candidateOffsetUtc,
         )
         _updatesFlow.tryEmit(upd)
     }
@@ -933,6 +952,9 @@ class RecordingCoordinator(
             "isPersisting" to isPersisting,
             "isStreamStale" to isStreamStale,
             "isBluetoothEnabled" to isBluetoothEnabled,
+            "sleepState" to (automaticSleepDetector?.currentState?.name ?: "NO_NIGHT"),
+            "candidateOnset" to automaticSleepDetector?.candidateOnsetUtc,
+            "candidateOffset" to automaticSleepDetector?.candidateOffsetUtc,
             "hasPermissions" to hasRequiredPermissions,
             "activeSessionId" to activeSessionId,
             "activeSegmentId" to activeSegmentId,

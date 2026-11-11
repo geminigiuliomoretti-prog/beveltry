@@ -31,6 +31,7 @@ class _SleepLabScreenState extends State<SleepLabScreen> {
   List<Map<String, dynamic>> _availableSessions = [];
   String? _selectedSessionId;
   SleepLabAnalysis? _analysis;
+  Map<String, dynamic>? _currentNightProcessing;
   bool _isLoading = true;
   String? _errorMessage;
 
@@ -100,9 +101,12 @@ class _SleepLabScreenState extends State<SleepLabScreen> {
         manualEndUtc: manualEnd,
       );
 
+      final proc = await widget.repository.getLatestNightProcessing();
+
       if (!mounted) return;
       setState(() {
         _analysis = analysis;
+        _currentNightProcessing = proc;
         _isLoading = false;
       });
     } catch (e) {
@@ -207,6 +211,9 @@ class _SleepLabScreenState extends State<SleepLabScreen> {
     return ListView(
       padding: const EdgeInsets.all(16.0),
       children: [
+        // 0. STATO AUTOMATICO TASK 08D
+        _buildAutoNightStatusBanner(),
+
         // 1. SELETTORE SESSIONE
         _buildSessionSelector(),
         const SizedBox(height: 16),
@@ -239,6 +246,46 @@ class _SleepLabScreenState extends State<SleepLabScreen> {
         _buildWhoopAComparisonCard(a),
         const SizedBox(height: 24),
       ],
+    );
+  }
+
+  Widget _buildAutoNightStatusBanner() {
+    final state = _currentNightProcessing?['state'] as String? ?? 'REPORT_READY';
+    final isFailed = state == 'PROCESS_FAILED';
+    final color = isFailed ? Colors.redAccent : Colors.tealAccent;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF131D2E),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        children: [
+          Icon(isFailed ? Icons.error_outline : Icons.auto_mode, color: color, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Stato Automatico (Task 08D): $state',
+              style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold),
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: Colors.purple.withValues(alpha: 0.2),
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(color: Colors.purpleAccent.withValues(alpha: 0.5)),
+            ),
+            child: const Text(
+              'EXPERIMENTAL_CARDIAC_ONLY',
+              style: TextStyle(color: Colors.purpleAccent, fontSize: 9, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

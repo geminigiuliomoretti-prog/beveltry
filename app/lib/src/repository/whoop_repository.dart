@@ -1068,6 +1068,126 @@ class WhoopRepository {
     return rows.isNotEmpty ? rows.first : null;
   }
 
+  // ==========================================
+  // TASK 08D: METODI PER AUTO SLEEP & REPORT
+  // ==========================================
+
+  /// Recupera lo stato di elaborazione dell'ultima notte rilevata.
+  Future<Map<String, dynamic>?> getLatestNightProcessing() async {
+    final db = await _database.database;
+    final rows = await db.query(
+      'night_processing',
+      orderBy: 'updated_at_utc DESC',
+      limit: 1,
+    );
+    return rows.isNotEmpty ? rows.first : null;
+  }
+
+  /// Recupera l'ultima analisi del sonno memorizzata (Sleep Lab Analysis atomica).
+  Future<Map<String, dynamic>?> getLatestSleepLabAnalysis() async {
+    final db = await _database.database;
+    final rows = await db.query(
+      'sleep_lab_analyses',
+      orderBy: 'created_at_utc DESC, revision DESC',
+      limit: 1,
+    );
+    return rows.isNotEmpty ? rows.first : null;
+  }
+
+  /// Salva lo stato di elaborazione notturna.
+  Future<void> saveNightProcessingState({
+    required String nightKey,
+    required String sessionId,
+    required String state,
+    int? candidateOnset,
+    int? candidateOffset,
+    int? lastProcessedAt,
+    String algorithmVersion = '1.0.0-cardiac-only',
+    String? errorCode,
+    double? confidence,
+    String? decisionReason,
+  }) async {
+    final db = await _database.database;
+    await db.insert(
+      'night_processing',
+      {
+        'night_key': nightKey,
+        'session_id': sessionId,
+        'state': state,
+        'candidate_onset': candidateOnset,
+        'candidate_offset': candidateOffset,
+        'last_processed_at': lastProcessedAt,
+        'algorithm_version': algorithmVersion,
+        'error_code': errorCode,
+        'confidence': confidence,
+        'decision_reason': decisionReason,
+        'updated_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Salva il record atomico dell'analisi Sleep Lab.
+  Future<void> saveSleepLabAnalysisRecord({
+    required String nightKey,
+    required String sessionId,
+    int revision = 1,
+    required String state,
+    String algorithmVersion = '1.0.0-cardiac-only',
+    int? sleepOnsetUtc,
+    int? sleepEndUtc,
+    required int tstSeconds,
+    required int wasoSeconds,
+    required double sleepEfficiency,
+    double? hrvRmssdMs,
+    double? hrvRollingMedianMs,
+    int? rhrBpm,
+    double? respirationRate,
+    double? respirationSnr,
+    required int usableEpochsCount,
+    required int totalEpochsCount,
+    required double coveragePercent,
+    required int gapsCount,
+    required double maxGapSeconds,
+    String? qualityFlags,
+    String classificationLabel = 'EXPERIMENTAL_CARDIAC_ONLY',
+    String? analysisJson,
+    String? errorMessage,
+  }) async {
+    final db = await _database.database;
+    await db.insert(
+      'sleep_lab_analyses',
+      {
+        'night_key': nightKey,
+        'session_id': sessionId,
+        'revision': revision,
+        'state': state,
+        'algorithm_version': algorithmVersion,
+        'sleep_onset_utc': sleepOnsetUtc,
+        'sleep_end_utc': sleepEndUtc,
+        'tst_seconds': tstSeconds,
+        'waso_seconds': wasoSeconds,
+        'sleep_efficiency': sleepEfficiency,
+        'hrv_rmssd_ms': hrvRmssdMs,
+        'hrv_rolling_median_ms': hrvRollingMedianMs,
+        'rhr_bpm': rhrBpm,
+        'respiration_rate': respirationRate,
+        'respiration_snr': respirationSnr,
+        'usable_epochs_count': usableEpochsCount,
+        'total_epochs_count': totalEpochsCount,
+        'coverage_percent': coveragePercent,
+        'gaps_count': gapsCount,
+        'max_gap_seconds': maxGapSeconds,
+        'quality_flags': qualityFlags,
+        'classification_label': classificationLabel,
+        'analysis_json': analysisJson,
+        'error_message': errorMessage,
+        'created_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
   Future<void> close() => _database.close();
 
   static V18Record _mapRowToV18Record(

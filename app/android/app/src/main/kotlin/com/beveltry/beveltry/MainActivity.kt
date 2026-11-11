@@ -240,6 +240,28 @@ class MainActivity : FlutterActivity() {
                     result.success(events)
                 }
 
+                // TASK 08D: Automatic Sleep Detection & Morning Report
+                "getLatestNightState" -> {
+                    val state = connectionService?.storageEngine?.getLatestNightProcessing()
+                    result.success(state)
+                }
+
+                "getLatestSleepAnalysis" -> {
+                    val analysis = connectionService?.storageEngine?.getLatestSleepLabAnalysis()
+                    result.success(analysis)
+                }
+
+                "triggerSleepAnalysis" -> {
+                    val nightKey = call.argument<String>("nightKey")
+                    if (nightKey == null) {
+                        result.error("INVALID_ARG", "nightKey richiesto", null)
+                        return@setMethodCallHandler
+                    }
+                    val sessionId = call.argument<String>("sessionId") ?: nightKey
+                    com.beveltry.ble.SleepAnalysisWorker.enqueue(applicationContext, nightKey, sessionId)
+                    result.success(true)
+                }
+
                 else -> result.notImplemented()
             }
         }
@@ -344,6 +366,9 @@ class MainActivity : FlutterActivity() {
                                 "isPersisting" to upd.isPersisting,
                                 "isStreamStale" to upd.isStreamStale,
                                 "isBluetoothEnabled" to upd.isBluetoothEnabled,
+                                "sleepState" to upd.sleepState,
+                                "candidateOnset" to upd.candidateOnset,
+                                "candidateOffset" to upd.candidateOffset,
                             )
                         )
                     }

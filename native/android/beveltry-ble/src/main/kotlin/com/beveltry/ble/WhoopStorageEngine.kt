@@ -261,6 +261,65 @@ class WhoopStorageEngine(
             CREATE INDEX IF NOT EXISTS idx_rec_segments_start 
             ON recording_segments(started_at_utc);
         """.trimIndent())
+
+        // Tabelle dedicate ad Automatic Sleep Detection e Morning Report (Task 08D)
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS night_processing (
+                night_key TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                candidate_onset INTEGER,
+                candidate_offset INTEGER,
+                last_processed_at INTEGER,
+                algorithm_version TEXT NOT NULL,
+                error_code TEXT,
+                confidence REAL,
+                decision_reason TEXT,
+                updated_at_utc INTEGER NOT NULL
+            );
+        """.trimIndent())
+
+        db.execSQL("""
+            CREATE INDEX IF NOT EXISTS idx_night_proc_sess 
+            ON night_processing(session_id);
+        """.trimIndent())
+
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS sleep_lab_analyses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                night_key TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 1,
+                state TEXT NOT NULL,
+                algorithm_version TEXT NOT NULL,
+                sleep_onset_utc INTEGER,
+                sleep_end_utc INTEGER,
+                tst_seconds INTEGER NOT NULL,
+                waso_seconds INTEGER NOT NULL,
+                sleep_efficiency REAL NOT NULL,
+                hrv_rmssd_ms REAL,
+                hrv_rolling_median_ms REAL,
+                rhr_bpm INTEGER,
+                respiration_rate REAL,
+                respiration_snr REAL,
+                usable_epochs_count INTEGER NOT NULL,
+                total_epochs_count INTEGER NOT NULL,
+                coverage_percent REAL NOT NULL,
+                gaps_count INTEGER NOT NULL,
+                max_gap_seconds REAL NOT NULL,
+                quality_flags TEXT,
+                classification_label TEXT NOT NULL DEFAULT 'EXPERIMENTAL_CARDIAC_ONLY',
+                analysis_json TEXT,
+                error_message TEXT,
+                created_at_utc INTEGER NOT NULL,
+                UNIQUE(night_key, revision)
+            );
+        """.trimIndent())
+
+        db.execSQL("""
+            CREATE INDEX IF NOT EXISTS idx_sleep_analyses_key 
+            ON sleep_lab_analyses(night_key);
+        """.trimIndent())
     }
 
     private fun getDb(): SQLiteDatabase {
@@ -802,6 +861,249 @@ class WhoopStorageEngine(
             }
         }
         return null
+    }
+
+    // TASK 08D: Metodi per la Night State Machine e Sleep Lab Analysis
+
+    fun saveNightProcessingState(
+        nightKey: String,
+        sessionId: String,
+        state: String,
+        candidateOnset: Long? = null,
+        candidateOffset: Long? = null,
+        lastProcessedAt: Long? = null,
+        algorithmVersion: String = "1.0.0-cardiac-only",
+        errorCode: String? = null,
+        confidence: Double? = null,
+        decisionReason: String? = null,
+    ) {
+        val db = getDb()
+        val now = System.currentTimeMillis()
+        val cv = ContentValues().apply {
+            put("night_key", nightKey)
+            put("session_id", sessionId)
+            put("state", state)
+            put("candidate_onset", candidateOnset)
+            put("candidate_offset", candidateOffset)
+            put("last_processed_at", lastProcessedAt)
+            put("algorithm_version", algorithmVersion)
+            put("error_code", errorCode)
+            put("confidence", confidence)
+            put("decision_reason", decisionReason)
+            put("updated_at_utc", now)
+        }
+        db.insertWithOnConflict("night_processing", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun getNightProcessing(nightKey: String): Map<String, Any?>? {
+        val db = getDb()
+        db.rawQuery(
+            "SELECT night_key, session_id, state, candidate_onset, candidate_offset, last_processed_at, algorithm_version, error_code, confidence, decision_reason, updated_at_utc FROM night_processing WHERE night_key = ?",
+            arrayOf(nightKey)
+        ).use { c ->
+            if (c.moveToFirst()) {
+                return mapOf(
+                    "nightKey" to c.getString(0),
+                    "sessionId" to c.getString(1),
+                    "state" to c.getString(2),
+                    "candidateOnset" to if (c.isNull(3)) null else c.getLong(3),
+                    "candidateOffset" to if (c.isNull(4)) null else c.getLong(4),
+                    "lastProcessedAt" to if (c.isNull(5)) null else c.getLong(5),
+                    "algorithmVersion" to c.getString(6),
+                    "errorCode" to if (c.isNull(7)) null else c.getString(7),
+                    "confidence" to if (c.isNull(8)) null else c.getDouble(8),
+                    "decisionReason" to if (c.isNull(9)) null else c.getString(9),
+                    "updatedAtUtc" to c.getLong(10),
+                )
+            }
+        }
+        return null
+    }
+
+    fun getLatestNightProcessing(): Map<String, Any?>? {
+        val db = getDb()
+        db.rawQuery(
+            "SELECT night_key, session_id, state, candidate_onset, candidate_offset, last_processed_at, algorithm_version, error_code, confidence, decision_reason, updated_at_utc FROM night_processing ORDER BY updated_at_utc DESC LIMIT 1",
+            null
+        ).use { c ->
+            if (c.moveToFirst()) {
+                return mapOf(
+                    "nightKey" to c.getString(0),
+                    "sessionId" to c.getString(1),
+                    "state" to c.getString(2),
+                    "candidateOnset" to if (c.isNull(3)) null else c.getLong(3),
+                    "candidateOffset" to if (c.isNull(4)) null else c.getLong(4),
+                    "lastProcessedAt" to if (c.isNull(5)) null else c.getLong(5),
+                    "algorithmVersion" to c.getString(6),
+                    "errorCode" to if (c.isNull(7)) null else c.getString(7),
+                    "confidence" to if (c.isNull(8)) null else c.getDouble(8),
+                    "decisionReason" to if (c.isNull(9)) null else c.getString(9),
+                    "updatedAtUtc" to c.getLong(10),
+                )
+            }
+        }
+        return null
+    }
+
+    fun saveSleepLabAnalysis(
+        nightKey: String,
+        sessionId: String,
+        revision: Int = 1,
+        state: String,
+        algorithmVersion: String = "1.0.0-cardiac-only",
+        sleepOnsetUtc: Long?,
+        sleepEndUtc: Long?,
+        tstSeconds: Int,
+        wasoSeconds: Int,
+        sleepEfficiency: Double,
+        hrvRmssdMs: Double?,
+        hrvRollingMedianMs: Double?,
+        rhrBpm: Int?,
+        respirationRate: Double?,
+        respirationSnr: Double?,
+        usableEpochsCount: Int,
+        totalEpochsCount: Int,
+        coveragePercent: Double,
+        gapsCount: Int,
+        maxGapSeconds: Double,
+        qualityFlags: String? = null,
+        classificationLabel: String = "EXPERIMENTAL_CARDIAC_ONLY",
+        analysisJson: String? = null,
+        errorMessage: String? = null,
+    ): Long {
+        val db = getDb()
+        val now = System.currentTimeMillis()
+        val cv = ContentValues().apply {
+            put("night_key", nightKey)
+            put("session_id", sessionId)
+            put("revision", revision)
+            put("state", state)
+            put("algorithm_version", algorithmVersion)
+            put("sleep_onset_utc", sleepOnsetUtc)
+            put("sleep_end_utc", sleepEndUtc)
+            put("tst_seconds", tstSeconds)
+            put("waso_seconds", wasoSeconds)
+            put("sleep_efficiency", sleepEfficiency)
+            put("hrv_rmssd_ms", hrvRmssdMs)
+            put("hrv_rolling_median_ms", hrvRollingMedianMs)
+            put("rhr_bpm", rhrBpm)
+            put("respiration_rate", respirationRate)
+            put("respiration_snr", respirationSnr)
+            put("usable_epochs_count", usableEpochsCount)
+            put("total_epochs_count", totalEpochsCount)
+            put("coverage_percent", coveragePercent)
+            put("gaps_count", gapsCount)
+            put("max_gap_seconds", maxGapSeconds)
+            put("quality_flags", qualityFlags)
+            put("classification_label", classificationLabel)
+            put("analysis_json", analysisJson)
+            put("error_message", errorMessage)
+            put("created_at_utc", now)
+        }
+        return db.insertWithOnConflict("sleep_lab_analyses", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun getLatestSleepLabAnalysis(): Map<String, Any?>? {
+        val db = getDb()
+        db.rawQuery(
+            """SELECT id, night_key, session_id, revision, state, algorithm_version, 
+                      sleep_onset_utc, sleep_end_utc, tst_seconds, waso_seconds, 
+                      sleep_efficiency, hrv_rmssd_ms, hrv_rolling_median_ms, rhr_bpm, 
+                      respiration_rate, respiration_snr, usable_epochs_count, 
+                      total_epochs_count, coverage_percent, gaps_count, max_gap_seconds, 
+                      quality_flags, classification_label, analysis_json, error_message, 
+                      created_at_utc 
+               FROM sleep_lab_analyses ORDER BY created_at_utc DESC, revision DESC LIMIT 1""",
+            null
+        ).use { c ->
+            if (c.moveToFirst()) {
+                return mapOf(
+                    "id" to c.getLong(0),
+                    "nightKey" to c.getString(1),
+                    "sessionId" to c.getString(2),
+                    "revision" to c.getInt(3),
+                    "state" to c.getString(4),
+                    "algorithmVersion" to c.getString(5),
+                    "sleepOnsetUtc" to if (c.isNull(6)) null else c.getLong(6),
+                    "sleepEndUtc" to if (c.isNull(7)) null else c.getLong(7),
+                    "tstSeconds" to c.getInt(8),
+                    "wasoSeconds" to c.getInt(9),
+                    "sleepEfficiency" to c.getDouble(10),
+                    "hrvRmssdMs" to if (c.isNull(11)) null else c.getDouble(11),
+                    "hrvRollingMedianMs" to if (c.isNull(12)) null else c.getDouble(12),
+                    "rhrBpm" to if (c.isNull(13)) null else c.getInt(13),
+                    "respirationRate" to if (c.isNull(14)) null else c.getDouble(14),
+                    "respirationSnr" to if (c.isNull(15)) null else c.getDouble(15),
+                    "usableEpochsCount" to c.getInt(16),
+                    "totalEpochsCount" to c.getInt(17),
+                    "coveragePercent" to c.getDouble(18),
+                    "gapsCount" to c.getInt(19),
+                    "maxGapSeconds" to c.getDouble(20),
+                    "qualityFlags" to if (c.isNull(21)) null else c.getString(21),
+                    "classificationLabel" to c.getString(22),
+                    "analysisJson" to if (c.isNull(23)) null else c.getString(23),
+                    "errorMessage" to if (c.isNull(24)) null else c.getString(24),
+                    "createdAtUtc" to c.getLong(25),
+                )
+            }
+        }
+        return null
+    }
+
+    data class NightSampleRow(
+        val id: Long,
+        val timestampUtc: Long,
+        val monotonicMillis: Long,
+        val hrBpm: Int,
+        val flags: Int
+    )
+
+    data class NightRrRow(
+        val id: Long,
+        val sampleId: Long,
+        val timestampUtc: Long,
+        val beatOrdinal: Int,
+        val rrMsDirect: Int
+    )
+
+    fun getSamplesForSession(sessionId: String): List<NightSampleRow> {
+        val db = getDb()
+        val list = mutableListOf<NightSampleRow>()
+        db.rawQuery(
+            "SELECT id, timestamp_utc, monotonic_millis, hr_bpm, flags FROM night_samples WHERE session_id = ? ORDER BY timestamp_utc ASC",
+            arrayOf(sessionId)
+        ).use { c ->
+            while (c.moveToNext()) {
+                list.add(NightSampleRow(
+                    id = c.getLong(0),
+                    timestampUtc = c.getLong(1),
+                    monotonicMillis = c.getLong(2),
+                    hrBpm = c.getInt(3),
+                    flags = c.getInt(4)
+                ))
+            }
+        }
+        return list
+    }
+
+    fun getRrIntervalsForSession(sessionId: String): List<NightRrRow> {
+        val db = getDb()
+        val list = mutableListOf<NightRrRow>()
+        db.rawQuery(
+            "SELECT id, sample_id, timestamp_utc, beat_ordinal, rr_ms_direct FROM night_rr_intervals WHERE session_id = ? ORDER BY timestamp_utc ASC, beat_ordinal ASC",
+            arrayOf(sessionId)
+        ).use { c ->
+            while (c.moveToNext()) {
+                list.add(NightRrRow(
+                    id = c.getLong(0),
+                    sampleId = c.getLong(1),
+                    timestampUtc = c.getLong(2),
+                    beatOrdinal = c.getInt(3),
+                    rrMsDirect = c.getInt(4)
+                ))
+            }
+        }
+        return list
     }
 
     companion object {

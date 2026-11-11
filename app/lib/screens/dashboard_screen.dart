@@ -45,6 +45,19 @@ class DashboardScreenState extends State<DashboardScreen> {
   final List<String> _logs = [];
   final ScrollController _logScrollController = ScrollController();
 
+  Map<String, dynamic>? _latestNightProcessing;
+  Map<String, dynamic>? _latestSleepLabAnalysis;
+  bool _isLoadingNight = false;
+
+  @visibleForTesting
+  Map<String, dynamic>? get latestNightProcessing => _latestNightProcessing;
+
+  @visibleForTesting
+  Map<String, dynamic>? get latestSleepLabAnalysis => _latestSleepLabAnalysis;
+
+  @visibleForTesting
+  bool get isLoadingNight => _isLoadingNight;
+
   @visibleForTesting
   bool get isCalculating => _isCalculating;
 
@@ -68,6 +81,24 @@ class DashboardScreenState extends State<DashboardScreen> {
     _syncService.statusMessageNotifier.addListener(_onSyncStatusChanged);
     _syncService.connectionStateNotifier.addListener(_onConnectionStateChanged);
     _addLog('Sistema inizializzato. Pronto per la scansione.');
+    _loadLatestNightData();
+  }
+
+  Future<void> _loadLatestNightData() async {
+    if (!mounted) return;
+    setState(() => _isLoadingNight = true);
+    try {
+      final proc = await _repository.getLatestNightProcessing();
+      final analysis = await _repository.getLatestSleepLabAnalysis();
+      if (!mounted) return;
+      setState(() {
+        _latestNightProcessing = proc;
+        _latestSleepLabAnalysis = analysis;
+        _isLoadingNight = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _isLoadingNight = false);
+    }
   }
 
   @override
@@ -373,49 +404,8 @@ class DashboardScreenState extends State<DashboardScreen> {
               ),
               const SizedBox(height: 8),
 
-              // Banner Accesso Rapido Beveltry Sleep Lab (Task 08A)
-              InkWell(
-                key: const Key('sleep_lab_entry_button'),
-                onTap: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) => SleepLabScreen(
-                        repository: _repository,
-                      ),
-                    ),
-                  );
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1E1336),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.purpleAccent.withValues(alpha: 0.4)),
-                  ),
-                  child: const Row(
-                    children: [
-                      Icon(Icons.science, color: Colors.purpleAccent, size: 22),
-                      SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'BEVELTRY SLEEP LAB (Task 08A)',
-                              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.purpleAccent),
-                            ),
-                            Text(
-                              'Analisi notturna deterministica, HRV Window Lab e confronto WHOOP A',
-                              style: TextStyle(fontSize: 11, color: Colors.grey),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Icon(Icons.arrow_forward_ios, size: 14, color: Colors.purpleAccent),
-                    ],
-                  ),
-                ),
-              ),
+              // Card Ultima Notte Rilevata & Morning Report (TASK 08D)
+              _buildAutoNightCard(),
               const SizedBox(height: 12),
 
               // 1. Riquadri principali Metriche (RHR e HRV)
@@ -996,6 +986,236 @@ class DashboardScreenState extends State<DashboardScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildAutoNightCard() {
+    final analysis = _latestSleepLabAnalysis;
+    final proc = _latestNightProcessing;
+
+    final String stateStr = (proc?['state'] as String?) ??
+        (analysis?['state'] as String?) ??
+        'NO_NIGHT';
+
+    final Color statusColor;
+    final String statusLabel;
+    switch (stateStr) {
+      case 'REPORT_READY':
+        statusColor = Colors.greenAccent;
+        statusLabel = 'REPORT PRONTO';
+        break;
+      case 'PROCESSING':
+        statusColor = Colors.blueAccent;
+        statusLabel = 'ELABORAZIONE IN CORSO';
+        break;
+      case 'PROCESS_PENDING':
+        statusColor = Colors.amberAccent;
+        statusLabel = 'ATTESA WORKER';
+        break;
+      case 'FINAL_WAKE_CONFIRMED':
+        statusColor = Colors.amberAccent;
+        statusLabel = 'RISVEGLIO CONFERMATO';
+        break;
+      case 'FINAL_WAKE_CANDIDATE':
+        statusColor = Colors.amberAccent;
+        statusLabel = 'CANDIDATO RISVEGLIO';
+        break;
+      case 'SLEEP_ACTIVE':
+        statusColor = Colors.indigoAccent;
+        statusLabel = 'SONNO IN CORSO';
+        break;
+      case 'WAKE_WITHIN_SLEEP':
+        statusColor = Colors.orangeAccent;
+        statusLabel = 'VEGLIA NOTTURNA (WASO)';
+        break;
+      case 'SLEEP_CANDIDATE':
+        statusColor = Colors.indigoAccent;
+        statusLabel = 'CANDIDATO SONNO';
+        break;
+      case 'PROCESS_FAILED':
+        statusColor = Colors.redAccent;
+        statusLabel = 'DATI INSUFFICIENTI';
+        break;
+      default:
+        statusColor = Colors.grey;
+        statusLabel = 'NESSUNA NOTTE';
+    }
+
+    final bool isInsufficient = stateStr == 'PROCESS_FAILED' || (analysis == null && proc == null);
+
+    final String nightKey = (proc?['night_key'] as String?) ??
+        (analysis?['night_key'] as String?) ??
+        'N/A';
+
+    String sleepWindowStr = 'Dati insufficienti';
+    String tstStr = 'Dati insufficienti';
+    String wasoStr = 'Dati insufficienti';
+    String hrvStr = 'Dati insufficienti';
+    String rhrStr = 'Dati insufficienti';
+    String respStr = 'Non disp.';
+    String coverageStr = '0%';
+    String gapsStr = '0 gap';
+
+    if (analysis != null) {
+      final onsetUtc = analysis['sleep_onset_utc'] as int?;
+      final endUtc = analysis['sleep_end_utc'] as int?;
+      if (onsetUtc != null && endUtc != null) {
+        final on = DateTime.fromMillisecondsSinceEpoch(onsetUtc, isUtc: true).toLocal();
+        final off = DateTime.fromMillisecondsSinceEpoch(endUtc, isUtc: true).toLocal();
+        String fH(int v) => v.toString().padLeft(2, '0');
+        sleepWindowStr = '${fH(on.hour)}:${fH(on.minute)} → ${fH(off.hour)}:${fH(off.minute)}';
+      }
+
+      final tstSec = (analysis['tst_seconds'] as int?) ?? 0;
+      final wasoSec = (analysis['waso_seconds'] as int?) ?? 0;
+      final hours = tstSec ~/ 3600;
+      final mins = (tstSec % 3600) ~/ 60;
+      tstStr = hours > 0 ? '${hours}h ${mins}m' : '${mins}m';
+      wasoStr = '${wasoSec ~/ 60}m';
+
+      final hrvVal = analysis['hrv_rmssd_ms'] as num?;
+      hrvStr = hrvVal != null ? '${hrvVal.toStringAsFixed(1)} ms' : 'Dati insufficienti';
+
+      final rhrVal = analysis['rhr_bpm'] as int?;
+      rhrStr = rhrVal != null ? '$rhrVal bpm' : 'Dati insufficienti';
+
+      final respVal = analysis['respiration_rate'] as num?;
+      respStr = respVal != null ? '${respVal.toStringAsFixed(1)} RPM' : 'Non disp.';
+
+      final covVal = analysis['coverage_percent'] as num?;
+      coverageStr = covVal != null ? '${covVal.toStringAsFixed(1)}%' : '100%';
+
+      final gapsVal = analysis['gaps_count'] as int? ?? 0;
+      gapsStr = '$gapsVal gap';
+    }
+
+    return InkWell(
+      key: const Key('sleep_lab_entry_button'),
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (context) => SleepLabScreen(
+              repository: _repository,
+            ),
+          ),
+        ).then((_) => _loadLatestNightData());
+      },
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: const Color(0xFF16112C),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Colors.purpleAccent.withValues(alpha: 0.5)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.nightlight_round, color: Colors.purpleAccent, size: 20),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'ULTIMA NOTTE RILEVATA (Auto Sleep TASK 08D)',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.purpleAccent),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: statusColor.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: statusColor),
+                  ),
+                  child: Text(
+                    statusLabel,
+                    style: TextStyle(color: statusColor, fontSize: 10, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Text(
+                  nightKey != 'N/A' ? 'Notte: $nightKey' : 'Nessuna notte recente',
+                  style: const TextStyle(fontSize: 11, color: Colors.white70),
+                ),
+                const Spacer(),
+                const Text(
+                  'Sperimentale (Cardiac-only)',
+                  style: TextStyle(fontSize: 10, color: Colors.orangeAccent),
+                ),
+              ],
+            ),
+            const Divider(color: Colors.white12, height: 16),
+            if (isInsufficient && analysis == null)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8.0),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, color: Colors.grey, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        stateStr == 'PROCESS_FAILED' ? 'Dati insufficienti (< 30 min registrati)' : 'In attesa della prima notte con Always-On...',
+                        style: const TextStyle(color: Colors.grey, fontSize: 12),
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            else ...[
+              Row(
+                children: [
+                  Expanded(child: _buildNightSubItem('Orario stimato', sleepWindowStr)),
+                  Expanded(child: _buildNightSubItem('Tempo Sonno (TST)', tstStr)),
+                  Expanded(child: _buildNightSubItem('WASO stimato', wasoStr)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(child: _buildNightSubItem('HRV RMSSD', hrvStr)),
+                  Expanded(child: _buildNightSubItem('RHR a riposo', rhrStr)),
+                  Expanded(child: _buildNightSubItem('Respirazione (RSA)', respStr)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(child: _buildNightSubItem('Copertura dati', coverageStr)),
+                  Expanded(child: _buildNightSubItem('Gap registrazione', gapsStr)),
+                  const Expanded(
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        Text('Apri Sleep Lab', style: TextStyle(fontSize: 11, color: Colors.purpleAccent, fontWeight: FontWeight.bold)),
+                        Icon(Icons.arrow_forward_ios, size: 12, color: Colors.purpleAccent),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNightSubItem(String label, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: const TextStyle(fontSize: 10, color: Colors.grey)),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white),
+          overflow: TextOverflow.ellipsis,
+        ),
+      ],
     );
   }
 
